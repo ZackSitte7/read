@@ -13,6 +13,7 @@
 | 原生分析引擎 | Ghidra 12.1.4 PUBLIC（`GHIDRA_INSTALL_DIR`） |
 | 目标样本 | `target/1102`，224 个文件，约 136 MB（不入库） |
 | 证据基线 | `artifacts/manifests/` 中的 SHA-256 清单 |
+| 交易终端复刻版 | `src/`，.NET 8 + WinForms，Mock 主链路已验证 |
 
 > `rea doctor` 中 Ghidra 12.1.4 的安装、平台、架构、Headless、反编译器与 JDK 检查均通过。
 > Hopper、IDA、JADX、Kuna 为可选引擎，未安装不影响 Windows PE 的 Ghidra 静态分析。
@@ -36,6 +37,12 @@
 ├── config/rea/rea.env           # REA / Ghidra 环境变量
 ├── docs/                        # 方法论文档与 ADR
 ├── scripts/                     # 环境校验、样本清点
+├── src/                         # 交易终端复刻版（.NET 8）
+│   ├── Replica.Core/            # 模型、接口、会话、Mock、XML/INI 读取
+│   ├── Replica.Ctp/             # CTP 行情/交易适配层
+│   ├── Replica.Desktop/         # WinForms 登录窗与主窗体
+│   ├── Replica.Simulator/       # 无界面主链路验证
+│   └── Replica.sln
 ├── target/1102/                 # 目标样本（不入库）
 └── tools/rea/                   # REA 上游源码（git submodule，固定提交）
 ```
@@ -56,6 +63,23 @@ make inventory
 rea --help
 rea doctor
 ```
+
+## 交易终端复刻版
+
+按原软件架构重建的 .NET 8 交易终端，保留登录、行情、下单、成交、持仓与日志，
+不包含授权码、MAC 绑定、云端认证与版本准入。详细映射见
+[复刻版架构说明](analysis/50-reimplementation/replica-architecture.md)。
+
+```bash
+# 编译（Linux 可编译 WinForms，运行桌面端需要 Windows）
+dotnet build Replica.sln -c Release
+
+# 无界面验证主链路：登录 → 行情 → 下单 → 成交 → 持仓
+dotnet run --project src/Replica.Simulator -c Release
+```
+
+桌面端运行后勾选“使用模拟行情与模拟撮合”即可在无 CTP 环境下操作；
+CTP 适配层当前为骨架，原生桥接层 `ReplicaCtpBridge` 尚未接入。
 
 ## 目标样本
 

@@ -25,3 +25,8 @@ node_modules/
 __pycache__/
 *.pyc
 .DS_Store
+
+# .NET build outputs
+bin/
+obj/
+*.user
