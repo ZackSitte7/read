@@ -43,6 +43,14 @@ from datetime import datetime
 
 _OUT_LOCK = threading.Lock()
 
+# Windows 下管道默认使用本地代码页（如 cp936），而 C# 按 UTF-8 解码会乱码。
+# 在捕获协议流之前统一改成 UTF-8。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 # TqSdk 自身会向 stdout 打印连接/账户日志。这里先保存协议输出流，
 # 再把 sys.stdout 指向 stderr，保证 stdout 上只有 JSON Lines。
 _PROTOCOL_OUT = sys.stdout
@@ -415,7 +423,8 @@ class TqEngine:
             from tqsdk import TqAccount, TqApi, TqAuth, TqKq
         except ImportError as exc:
             raise RuntimeError(
-                "未安装 tqsdk。请在命令行执行：python -m pip install -U tqsdk"
+                f"未安装 tqsdk（当前 Python: {sys.executable}）。"
+                f"请执行：\"{sys.executable}\" -m pip install -U tqsdk"
             ) from exc
 
         account = None
@@ -667,6 +676,7 @@ def main() -> int:
     threading.Thread(target=reader, name="stdin-reader", daemon=True).start()
 
     emit({"type": "log", "message": "桥接进程已启动，等待连接参数。"})
+    log(f"Python {sys.version.split()[0]}，解释器 {sys.executable}")
 
     try:
         while state["running"]:

@@ -106,6 +106,14 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
             catch (TqSdkBridgeException ex) when (
                 _options.AutoInstall && !_options.Simulated && IsMissingTqSdk(ex.Message))
             {
+                if (IsBundledPython())
+                {
+                    Log?.Invoke(this,
+                        "内置 Python 运行时缺少 tqsdk，请重新解压发布包；" +
+                        "或在 tqsdk.local.json 的 pythonPath 中指定已安装 tqsdk 的系统 Python。");
+                    throw;
+                }
+
                 Log?.Invoke(this, $"未检测到 tqsdk：{ex.Message}");
                 RestartProcess();
                 if (!await AutoInstallAsync(cancellationToken).ConfigureAwait(false))
@@ -355,9 +363,10 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
         }
 
         var script = _options.ResolveScriptPath();
+        var python = ResolvePython();
         var startInfo = new ProcessStartInfo
         {
-            FileName = ResolvePython(),
+            FileName = python,
             WorkingDirectory = Path.GetDirectoryName(script) ?? AppContext.BaseDirectory,
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -368,6 +377,9 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
             StandardErrorEncoding = Utf8,
             StandardInputEncoding = Utf8,
         };
+        // 强制 Python 使用 UTF-8 管道编码，避免中文日志在 C# 侧乱码。
+        startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+        startInfo.Environment["PYTHONUTF8"] = "1";
         startInfo.ArgumentList.Add(script);
         if (_options.Simulated)
         {
@@ -394,6 +406,14 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
         process.Exited += (_, _) => HandleProcessExit(process);
         _reader = Task.Run(() => ReadLoopAsync(process, _life.Token));
         _stderr = Task.Run(() => ReadErrorLoopAsync(process, _life.Token));
+        Log?.Invoke(this, $"桥接进程已启动：{python} {script}");
+    }
+
+    private bool IsBundledPython()
+    {
+        var python = Path.GetFullPath(ResolvePython());
+        var bundled = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "python"));
+        return python.StartsWith(bundled + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     private string ResolvePython() =>
@@ -424,6 +444,7 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
 
     private static bool IsMissingTqSdk(string message) =>
         message.Contains("未安装 tqsdk", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("缺少 tqsdk", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("No module named 'tqsdk'", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("No module named \"tqsdk\"", StringComparison.OrdinalIgnoreCase);
 
@@ -467,6 +488,8 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
+        startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+        startInfo.Environment["PYTHONUTF8"] = "1";
         foreach (var argument in new[] { "-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "tqsdk" })
         {
             startInfo.ArgumentList.Add(argument);
