@@ -5,6 +5,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <RootNamespace>Replica.Desktop</RootNamespace>
+    <Version>2026.10.23.2</Version>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Replica.Core\Replica.Core.csproj" />

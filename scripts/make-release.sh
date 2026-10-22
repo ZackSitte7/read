@@ -15,6 +15,8 @@ dotnet publish "$ROOT/src/Replica.Desktop/Replica.Desktop.csproj" \
   -o "$OUT" --nologo
 
 if [ -d "$RUNTIME" ]; then
+  echo "校验内置 Python 运行时依赖..."
+  python3 "$ROOT/scripts/check-runtime.py" "$RUNTIME"
   echo "复制内置 Python 运行时..."
   cp -a "$RUNTIME" "$OUT/python"
 else

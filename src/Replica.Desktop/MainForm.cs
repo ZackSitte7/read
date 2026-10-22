@@ -95,7 +95,8 @@ internal sealed class MainForm : Form
     private MinuteBarsForm? _minuteBars;
 
     private int _group = 1;
-    private int _offsetMode = 1;
+    // 原版默认开仓（CBOC 未勾选时），平仓由左侧 C 开关切换。
+    private int _offsetMode;
     private int _soundMode;
     private int _tradeCount;
     private int _quoteCount;
@@ -113,7 +114,11 @@ internal sealed class MainForm : Form
         Text = "YYWin";
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
-        ClientSize = new Size(Theme.S(428), Theme.S(1515));
+        // 原版窗口宽 428（144 DPI）= 131 信息栏 + 300 价格列表。
+        // 复刻版把「每个合约一个竖框」并排显示，共 5 个竖框：
+        // 132 信息栏 + 16 列表栏 + 5 × 168 竖框。
+        ClientSize = new Size(Theme.S(132) + PriceLadder.RailWidth + PriceLadder.MaxColumns * 168,
+            Theme.S(1515));
         StartPosition = FormStartPosition.Manual;
         FormBorderStyle = FormBorderStyle.SizableToolWindow;
         MinimizeBox = true;
@@ -163,11 +168,16 @@ internal sealed class MainForm : Form
         _ladder.PositionProvider = PositionsOf;
         _ladder.CellClicked += OnLadderCellClicked;
         _ladder.ColumnActivated += OnColumnActivated;
+        _ladder.GroupRequested += (_, group) => SetGroup(group);
+        _ladder.LockProvider = LockTextOf;
         _ladder.Depth = 10;
         _ladder.WheelRows = 1;
-        _ladder.SetBounds(Theme.S(132), 0, Theme.S(300), ClientSize.Height);
-        _ladder.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Bottom;
+        _ladder.SetBounds(Theme.S(132), 0, ClientSize.Width - Theme.S(132), ClientSize.Height);
+        _ladder.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right;
         Controls.Add(_ladder);
+        _ladder.ContextMenuStrip = BuildLadderMenu();
+        FitLadder();
+        Resize += (_, _) => FitLadder();
 
         _lbHqCount = Lbl("LBHQCount", 50, 2, 28, 18, "0", Theme.F(16, true), Theme.Delphi(7895260));
         _lbHqCount.TextAlign = ContentAlignment.MiddleRight;
@@ -186,7 +196,11 @@ internal sealed class MainForm : Form
 
         _lbCloseYesterday = ClickLabel("LBCloseYesterday", 26, 1, 23, 23, "昨", Theme.F(18, true), Color.Black,
             Color.Yellow, ContentAlignment.MiddleCenter);
-        _lbCloseYesterday.Click += (_, _) => _log.Append("昨仓按钮：平昨仓模式。");
+        _lbCloseYesterday.Click += (_, _) =>
+        {
+            SetOffsetMode(3);
+            _log.Append("开平模式：平昨。");
+        };
         _hiddenExtras.Add(_lbCloseYesterday);
 
         _lbTimer = Lbl("LBTimer", 0, 26, 131, 28, "00:00:00", Theme.F(26, true, "宋体"),
@@ -308,7 +322,7 @@ internal sealed class MainForm : Form
             Color.Teal, null, ContentAlignment.MiddleLeft);
         _lbGroup.Click += (_, _) => CycleGroup();
 
-        _lbCjSyMode = ClickLabel("LBCJSYMode", 35, 1226, 21, 19, "1", Theme.F(18, true, "宋体"), Color.Black,
+        _lbCjSyMode = ClickLabel("LBCJSYMode", 35, 1226, 21, 19, "0", Theme.F(18, true, "宋体"), Color.Black,
             Theme.ModeBack, ContentAlignment.MiddleCenter);
         _lbCjSyMode.Click += (_, _) => CycleOffsetMode();
 
@@ -340,10 +354,12 @@ internal sealed class MainForm : Form
 
         _cbShow = Toggle("CBShow", 5, 1388, 98, 27, "显示功能", false, Theme.F(20, false, "微软雅黑"),
             Color.Blue);
+        _cbShow.Click += (_, _) => ToggleFunctionExtras();
         _cbHys = Toggle("CBHYS", 5, 1421, 78, 27, "合约锁", false, Theme.F(20, false, "微软雅黑"),
             Theme.Delphi(8388863));
 
         _cbOc = Toggle("CBOC", 10, 1281, 31, 27, "C", false, Theme.F(20, false, "微软雅黑"), Color.Black);
+        _cbOc.Click += (_, _) => ToggleCloseMode();
         _hiddenExtras.Add(_cbOc);
 
         var ptEx = Lbl("LBPtEX", 3, 651, 20, 20, "Pt", Theme.F(20), Color.Black);
@@ -376,6 +392,13 @@ internal sealed class MainForm : Form
         }
 
         BuildContextMenu();
+    }
+
+    /// <summary>按可用宽度均分竖框，保证 5 个合约竖框并排且宽度一致。</summary>
+    private void FitLadder()
+    {
+        var available = _ladder.Width - PriceLadder.RailWidth;
+        _ladder.BoxWidth = Math.Max(110, available / PriceLadder.MaxColumns);
     }
 
     private Label Lbl(
@@ -494,6 +517,57 @@ internal sealed class MainForm : Form
         var item = new ToolStripMenuItem(text);
         item.Click += handler;
         return item;
+    }
+
+    /// <summary>竖框右键菜单：针对当前合约撤单、平仓、锁定与价差对腿。</summary>
+    private ContextMenuStrip BuildLadderMenu()
+    {
+        var menu = new ContextMenuStrip();
+        string Id() => _ladder.ActiveInstrument ?? string.Empty;
+
+        var cancel = MenuItem("撤销该合约挂单", async (_, _) => await CancelInstrumentAsync(Id()));
+        var close = MenuItem("平掉该合约持仓", async (_, _) => await CloseInstrumentAsync(Id()));
+        var reset = MenuItem("重置该合约滚动", (_, _) => _ladder.ResetScroll());
+        var spread = MenuItem("设为价差对腿", (_, _) =>
+        {
+            _txSprdId.Text = Id();
+            _log.Append($"价差对腿：{Id()}（开启「价差切换」后生效）。");
+        });
+
+        menu.Items.Add(cancel);
+        menu.Items.Add(close);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(reset);
+        menu.Items.Add(spread);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(MenuItem("锁定该合约列", (_, _) =>
+        {
+            _lockedColumn = Id();
+            if (!IsOn(_cbHys))
+            {
+                SetToggle(_cbHys, true);
+            }
+
+            _ladder.Invalidate();
+            _log.Append($"合约锁：锁定 {Id()}。");
+        }));
+
+        menu.Opening += (_, e) =>
+        {
+            var id = Id();
+            if (string.IsNullOrEmpty(id))
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            cancel.Text = $"撤销 {id} 挂单";
+            close.Text = $"平掉 {id} 持仓";
+            reset.Text = $"重置 {id} 滚动";
+            spread.Text = $"设为价差对腿：{id}";
+        };
+
+        return menu;
     }
 
     // ---------------------------------------------------------------- 状态
@@ -657,7 +731,9 @@ internal sealed class MainForm : Form
         _lbRed.Text = up.ToString();
         _lbBlue.Text = down.ToString();
         _lbHqCount.Text = _quoteCount.ToString();
-        _lbGroup.Text = _ladder.ActiveInstrument is { Length: > 0 } current ? $"分组: {_group}\n{current}" : $"分组: {_group}";
+        _lbGroup.Text = _ladder.ActiveInstrument is { Length: > 0 } current
+            ? $"分组: {_group}/{_ladder.GroupCount}\n{current}"
+            : $"分组: {_group}/{_ladder.GroupCount}";
         _lbCjJc.Text = _account is null
             ? $"成交 {_tradeCount}  撤 {_cancelCount}"
             : $"成交 {_tradeCount}  撤 {_cancelCount}\n权益 {_account.Balance:0}";
@@ -811,6 +887,23 @@ internal sealed class MainForm : Form
                 string.Equals(p.InstrumentId, instrumentId, StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
+    /// <summary>竖框标题上的锁定标记：合约锁 / 白格单锁。</summary>
+    private string? LockTextOf(string instrumentId)
+    {
+        if (IsOn(_cbHys) &&
+            string.Equals(_lockedColumn, instrumentId, StringComparison.OrdinalIgnoreCase))
+        {
+            return "锁";
+        }
+
+        if (IsOn(_cbBgds) && WorkingOrders(instrumentId).Count > 0)
+        {
+            return "白";
+        }
+
+        return null;
+    }
+
     private void OnColumnActivated(object? sender, string instrumentId)
     {
         if (IsOn(_cbHys) && _lockedColumn is not null &&
@@ -874,7 +967,8 @@ internal sealed class MainForm : Form
             {
                 0 => OffsetFlag.Open,
                 1 => OffsetFlag.Close,
-                _ => OffsetFlag.CloseToday,
+                2 => OffsetFlag.CloseToday,
+                _ => OffsetFlag.CloseYesterday,
             };
             var type = IsOn(_cbFok)
                 ? OrderType.Fok
@@ -984,18 +1078,18 @@ internal sealed class MainForm : Form
 
     private void CycleGroup()
     {
-        var total = Math.Max(1, (int)Math.Ceiling(_instruments.All.Count / 5.0));
+        var total = Math.Max(1, _ladder.GroupCount);
         _group = _group >= total ? 1 : _group + 1;
         ApplyGroup();
-        _log.Append($"切换到分组 {_group}。");
+        _log.Append($"切换到分组 {_group}/{total}。");
     }
 
     internal void SetGroup(int group)
     {
-        var total = Math.Max(1, (int)Math.Ceiling(_instruments.All.Count / 5.0));
+        var total = Math.Max(1, _ladder.GroupCount);
         _group = Math.Clamp(group, 1, total);
         ApplyGroup();
-        _log.Append($"切换到分组 {_group}。");
+        _log.Append($"切换到分组 {_group}/{total}。");
     }
 
     private void ApplyGroup()
@@ -1012,14 +1106,18 @@ internal sealed class MainForm : Form
             }
         }
 
-        var start = (_group - 1) * 5;
+        var total = Math.Max(1, (int)Math.Ceiling(all.Count / (double)PriceLadder.MaxColumns));
+        _ladder.GroupCount = total;
+        _ladder.ActiveGroup = Math.Clamp(_group, 1, total);
+
+        var start = (_group - 1) * PriceLadder.MaxColumns;
         if (start >= all.Count)
         {
             _group = 1;
             start = 0;
         }
 
-        var slice = all.Skip(start).Take(5).ToList();
+        var slice = all.Skip(start).Take(PriceLadder.MaxColumns).ToList();
         if (slice.Count == 0)
         {
             _log.Append("没有可用合约。");
@@ -1029,6 +1127,7 @@ internal sealed class MainForm : Form
         _contracts.Clear();
         _contracts.AddRange(slice);
         _ladder.SetContracts(_contracts);
+        FitLadder();
 
         var missing = slice
             .Where(id => !_session.Subscriptions.Contains(id, StringComparer.OrdinalIgnoreCase))
@@ -1129,14 +1228,45 @@ internal sealed class MainForm : Form
 
     private void CycleOffsetMode()
     {
-        _offsetMode = (_offsetMode + 1) % 3;
-        _lbCjSyMode.Text = _offsetMode.ToString();
+        SetOffsetMode((_offsetMode + 1) % 4);
         _log.Append(_offsetMode switch
         {
             0 => "开平模式：开仓。",
             1 => "开平模式：平仓。",
-            _ => "开平模式：平今。",
+            2 => "开平模式：平今。",
+            _ => "开平模式：平昨。",
         });
+    }
+
+    private void SetOffsetMode(int mode)
+    {
+        _offsetMode = Math.Clamp(mode, 0, 3);
+        _lbCjSyMode.Text = _offsetMode.ToString();
+        _cbOc.Text = Theme.ToggleText(_offsetMode == 1, "C");
+        UpdateInfo();
+    }
+
+    /// <summary>原版 CBOC：勾选 C 后行情梯点击改为平仓，默认开仓。</summary>
+    private void ToggleCloseMode()
+    {
+        SetOffsetMode(_offsetMode == 1 ? 0 : 1);
+        _log.Append(_offsetMode == 1
+            ? "平仓模式：C 已勾选，行情梯点击将平仓。"
+            : "平仓模式：已取消，行情梯点击将开仓。");
+    }
+
+    /// <summary>原版 CBShow「显示功能」：展开被隐藏的昨仓、平仓开关与撤单计数。</summary>
+    private void ToggleFunctionExtras()
+    {
+        // Toggle() 已先按 √ 前缀翻转，这里直接读取翻转后的状态。
+        var show = IsOn(_cbShow);
+        _cbShow.Text = Theme.ToggleText(show, "显示功能");
+        _lbCloseYesterday.Visible = show;
+        _cbOc.Visible = show;
+        _lbCdCount.Visible = show;
+        _log.Append(show
+            ? "显示功能：已展开「昨」「C」与撤单计数。"
+            : "显示功能：已收起扩展控件。");
     }
 
     /// <summary>60 秒平仓倒计时：第一次点击开始，倒计时中再次点击取消。</summary>
@@ -1209,6 +1339,59 @@ internal sealed class MainForm : Form
 
         _lbCdCount.Text = _cancelCount.ToString();
         _log.Append($"已撤 {working.Length} 笔委托。");
+    }
+
+    private async Task CancelInstrumentAsync(string instrumentId)
+    {
+        if (string.IsNullOrEmpty(instrumentId))
+        {
+            return;
+        }
+
+        var working = WorkingOrders(instrumentId);
+        if (working.Count == 0)
+        {
+            _log.Append($"{instrumentId} 没有未成交委托。");
+            return;
+        }
+
+        foreach (var order in working)
+        {
+            try
+            {
+                await _session.CancelOrderAsync(order.OrderId);
+                _cancelCount++;
+            }
+            catch (Exception ex)
+            {
+                _log.Append($"撤单 {order.OrderId} 失败：{ex.Message}");
+            }
+        }
+
+        _lbCdCount.Text = _cancelCount.ToString();
+        _log.Append($"已撤 {instrumentId} {working.Count} 笔委托。");
+    }
+
+    private async Task CloseInstrumentAsync(string instrumentId)
+    {
+        if (string.IsNullOrEmpty(instrumentId))
+        {
+            return;
+        }
+
+        var positions = PositionsOf(instrumentId);
+        if (positions.Count == 0)
+        {
+            _log.Append($"{instrumentId} 没有持仓。");
+            return;
+        }
+
+        foreach (var position in positions)
+        {
+            await ClosePositionAsync(position);
+        }
+
+        _log.Append($"已提交 {instrumentId} 平仓委托 {positions.Count} 笔。");
     }
 
     internal async Task CloseAllPositionsAsync()
@@ -1635,9 +1818,17 @@ internal sealed class MainForm : Form
         }
 
         var area = Screen.FromControl(this).WorkingArea;
-        var width = Math.Max(Width, ClientSize.Width + (Width - ClientSize.Width));
+
+        // 原版窗口高 1515（144 DPI），低分辨率屏幕上按工作区收缩，避免标题栏跑出屏幕。
+        var width = Math.Min(Width, area.Width);
+        var height = Math.Min(Height, area.Height);
+        if (width != Width || height != Height)
+        {
+            Size = new Size(width, height);
+        }
+
         Location = new Point(
-            Math.Max(area.Left, area.Right - width),
+            Math.Max(area.Left, area.Right - Width),
             Math.Max(area.Top, area.Top));
     }
 

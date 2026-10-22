@@ -109,8 +109,10 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
                 if (IsBundledPython())
                 {
                     Log?.Invoke(this,
-                        "内置 Python 运行时缺少 tqsdk，请重新解压发布包；" +
-                        "或在 tqsdk.local.json 的 pythonPath 中指定已安装 tqsdk 的系统 Python。");
+                        $"内置 Python 运行时（{ResolvePython()}）无法导入 tqsdk。" +
+                        "请使用最新发布包并完整解压 python 目录；" +
+                        "或在 tqsdk.local.json 的 pythonPath 指定已安装 tqsdk 的系统 Python。" +
+                        $"原因：{ex.Message}");
                     throw;
                 }
 
@@ -445,6 +447,7 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
     private static bool IsMissingTqSdk(string message) =>
         message.Contains("未安装 tqsdk", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("缺少 tqsdk", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("tqsdk 导入失败", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("No module named 'tqsdk'", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("No module named \"tqsdk\"", StringComparison.OrdinalIgnoreCase);
 

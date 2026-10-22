@@ -422,9 +422,11 @@ class TqEngine:
         try:
             from tqsdk import TqAccount, TqApi, TqAuth, TqKq
         except ImportError as exc:
+            missing = getattr(exc, "name", None) or str(exc)
             raise RuntimeError(
-                f"未安装 tqsdk（当前 Python: {sys.executable}）。"
-                f"请执行：\"{sys.executable}\" -m pip install -U tqsdk"
+                f"tqsdk 导入失败（当前 Python: {sys.executable}），缺少模块：{missing}。"
+                f"源码运行请执行：\"{sys.executable}\" -m pip install -U tqsdk；"
+                f"发布包运行请重新解压完整发布包。"
             ) from exc
 
         account = None

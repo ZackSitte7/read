@@ -74,7 +74,7 @@ public sealed class LoginForm : Form
 
         _instruments = LoadInstruments();
 
-        Text = "YY交易";
+        Text = $"YY交易 {Application.ProductVersion}";
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
         ClientSize = new Size(Theme.S(1017), Theme.S(644));
@@ -112,7 +112,7 @@ public sealed class LoginForm : Form
         _latencyTimer.Tick += async (_, _) => await ProbeLatencyAsync();
         _latencyTimer.Start();
 
-        _log.Append("登录窗口已启动，选择行情与交易服务后登陆。");
+        _log.Append($"登录窗口已启动（构建 {Application.ProductVersion}），选择行情与交易服务后登陆。");
     }
 
     private void BuildLayout()
@@ -628,8 +628,8 @@ public sealed class LoginForm : Form
             _log.Append($"登录失败：{ex.Message}");
             SetLoginEnabled(true);
             var hint = isTqSdk
-                ? "\n\n提示：可运行发布目录中的 install-tqsdk.bat 安装 Python 依赖；" +
-                  "若暂时无法安装，请在登录窗选择「TqSdk 本地模拟行情」。"
+                ? "\n\n提示：发布包自带 Python 运行时（python 目录），请确认解压完整；" +
+                  "若暂时无法启动行情，可在登录窗选择「TqSdk 本地模拟行情」。"
                 : string.Empty;
             MessageBox.Show(
                 this,
