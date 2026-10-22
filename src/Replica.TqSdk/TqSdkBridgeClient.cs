@@ -78,12 +78,6 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
                 return;
             }
 
-            StartProcess();
-
-            var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _ready = ready;
-            _lastError = string.Empty;
-
             var body = new JsonObject
             {
                 ["auth"] = new JsonObject
@@ -105,18 +99,21 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
             };
 
             ConnectionChanged?.Invoke(this, ConnectionState.Connecting);
-            await SendAsync("connect", body, cancellationToken).ConfigureAwait(false);
-
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(45));
             try
             {
-                await ready.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+                await ConnectOnceAsync(body, cancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (TqSdkBridgeException ex) when (
+                _options.AutoInstall && !_options.Simulated && IsMissingTqSdk(ex.Message))
             {
-                throw new TimeoutException(
-                    $"TqSdk 连接超时。{(_lastError.Length > 0 ? _lastError : "请检查网络与账号。")}");
+                Log?.Invoke(this, $"未检测到 tqsdk：{ex.Message}");
+                RestartProcess();
+                if (!await AutoInstallAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    throw;
+                }
+
+                await ConnectOnceAsync(body, cancellationToken).ConfigureAwait(false);
             }
 
             _connected = true;
@@ -360,9 +357,7 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
         var script = _options.ResolveScriptPath();
         var startInfo = new ProcessStartInfo
         {
-            FileName = string.IsNullOrWhiteSpace(_options.PythonPath)
-                ? TqSdkOptions.DefaultPythonPath
-                : _options.PythonPath,
+            FileName = ResolvePython(),
             WorkingDirectory = Path.GetDirectoryName(script) ?? AppContext.BaseDirectory,
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -393,11 +388,124 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
                 ex);
         }
 
-        _stdin = _process.StandardInput;
-        _process.EnableRaisingEvents = true;
-        _process.Exited += (_, _) => HandleProcessExit();
-        _reader = Task.Run(() => ReadLoopAsync(_life.Token));
-        _stderr = Task.Run(() => ReadErrorLoopAsync(_life.Token));
+        var process = _process;
+        _stdin = process.StandardInput;
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) => HandleProcessExit(process);
+        _reader = Task.Run(() => ReadLoopAsync(process, _life.Token));
+        _stderr = Task.Run(() => ReadErrorLoopAsync(process, _life.Token));
+    }
+
+    private string ResolvePython() =>
+        string.IsNullOrWhiteSpace(_options.PythonPath) ? TqSdkOptions.DefaultPythonPath : _options.PythonPath;
+
+    private async Task ConnectOnceAsync(JsonObject body, CancellationToken cancellationToken)
+    {
+        StartProcess();
+
+        var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _ready = ready;
+        _lastError = string.Empty;
+
+        await SendAsync("connect", body, cancellationToken).ConfigureAwait(false);
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(45));
+        try
+        {
+            await ready.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"TqSdk 连接超时。{(_lastError.Length > 0 ? _lastError : "请检查网络与账号。")}");
+        }
+    }
+
+    private static bool IsMissingTqSdk(string message) =>
+        message.Contains("未安装 tqsdk", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("No module named 'tqsdk'", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("No module named \"tqsdk\"", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>丢弃旧进程，准备用同一个桥接脚本重新连接。</summary>
+    private void RestartProcess()
+    {
+        var process = _process;
+        _process = null;
+        _stdin = null;
+        if (process is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // 进程可能已经退出。
+        }
+
+        process.Dispose();
+    }
+
+    /// <summary>在目标机上自动执行 pip install -U tqsdk，输出转进日志。</summary>
+    private async Task<bool> AutoInstallAsync(CancellationToken cancellationToken)
+    {
+        var python = ResolvePython();
+        Log?.Invoke(this, $"正在自动安装 tqsdk：{python} -m pip install -U tqsdk（首次安装约 1-3 分钟）");
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = python,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var argument in new[] { "-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "tqsdk" })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        try
+        {
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return false;
+            }
+
+            var output = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var error = process.StandardError.ReadToEndAsync(cancellationToken);
+            await Task.WhenAll(output, error).ConfigureAwait(false);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+
+            foreach (var line in $"{output.Result}\n{error.Result}".Split(
+                         '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                Log?.Invoke(this, $"[pip] {line}");
+            }
+
+            if (process.ExitCode != 0)
+            {
+                Log?.Invoke(this, $"tqsdk 自动安装失败（退出码 {process.ExitCode}），" +
+                                  $"请手动执行：{python} -m pip install -U tqsdk");
+                return false;
+            }
+
+            Log?.Invoke(this, "tqsdk 安装完成，正在重新连接。");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke(this, $"tqsdk 自动安装失败：{ex.Message}，请手动执行：{python} -m pip install -U tqsdk");
+            return false;
+        }
     }
 
     private async Task<long> SendAsync(string command, JsonObject body, CancellationToken cancellationToken)
@@ -479,9 +587,9 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
         }
     }
 
-    private async Task ReadLoopAsync(CancellationToken cancellationToken)
+    private async Task ReadLoopAsync(Process process, CancellationToken cancellationToken)
     {
-        var stdout = _process?.StandardOutput;
+        var stdout = process.StandardOutput;
         if (stdout is null)
         {
             return;
@@ -519,13 +627,13 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
         }
         finally
         {
-            HandleProcessExit();
+            HandleProcessExit(process);
         }
     }
 
-    private async Task ReadErrorLoopAsync(CancellationToken cancellationToken)
+    private async Task ReadErrorLoopAsync(Process process, CancellationToken cancellationToken)
     {
-        var stderr = _process?.StandardError;
+        var stderr = process.StandardError;
         if (stderr is null)
         {
             return;
@@ -815,11 +923,19 @@ public sealed class TqSdkBridgeClient : IMarketDataClient, ITradeClient
             UpdateTime = DateTime.Now,
         };
 
-    private void HandleProcessExit()
+    private void HandleProcessExit(Process process)
     {
+        // 自动重试时旧进程的退出事件可能晚于新进程启动，忽略过期通知。
+        if (!ReferenceEquals(_process, process))
+        {
+            return;
+        }
+
         if (_connected || _ready is { Task.IsCompleted: false })
         {
-            _lastError = _lastError.Length > 0 ? _lastError : "TqSdk 桥接进程已退出。";
+            _lastError = _lastError.Length > 0
+                ? _lastError
+                : "TqSdk 桥接进程已退出（未收到错误详情），请确认 Python 与 tqsdk 已安装。";
             _ready?.TrySetException(new TqSdkBridgeException(_lastError));
             _connected = false;
             ConnectionChanged?.Invoke(this, ConnectionState.Disconnected);

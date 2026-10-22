@@ -627,9 +627,13 @@ public sealed class LoginForm : Form
 
             _log.Append($"登录失败：{ex.Message}");
             SetLoginEnabled(true);
+            var hint = isTqSdk
+                ? "\n\n提示：可运行发布目录中的 install-tqsdk.bat 安装 Python 依赖；" +
+                  "若暂时无法安装，请在登录窗选择「TqSdk 本地模拟行情」。"
+                : string.Empty;
             MessageBox.Show(
                 this,
-                ex.Message,
+                ex.Message + hint,
                 "登陆失败",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);

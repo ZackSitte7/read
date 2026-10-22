@@ -716,9 +716,10 @@ def handle_command(command: dict, state: dict) -> bool:
             engine.connect(command.get("auth", {}), command.get("trade", {}))
             emit({"type": "ready", "id": request_id, "source": state["source"]})
         except Exception as exc:
+            # 保持进程存活，让 C# 侧完整收到错误详情后再决定是否重启/安装依赖。
             emit({"type": "error", "id": request_id, "message": f"{exc}"})
             log(f"连接失败：{exc}")
-            return False
+            return True
         return True
 
     engine = state["engine"]

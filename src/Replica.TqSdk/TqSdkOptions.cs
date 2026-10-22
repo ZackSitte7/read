@@ -12,6 +12,9 @@ public sealed record TqSdkOptions
     /// <summary>使用内置模拟引擎（不需要安装 tqsdk，也不连接网络）。</summary>
     public bool Simulated { get; init; }
 
+    /// <summary>缺少 tqsdk 时自动执行 pip 安装并重试。</summary>
+    public bool AutoInstall { get; init; } = true;
+
     /// <summary>天勤账户。</summary>
     public required string AuthUser { get; init; }
 
