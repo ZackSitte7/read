@@ -1,0 +1,48 @@
+{
+  "target": "1102",
+  "files": 224,
+  "bytes": 140977587,
+  "source_archive": "0a3267c57aae1ba227f9be320f06630c09ab07cb6f711f9a63d8df1da22e3e2c  0701c0d0-11ab-46a8-ac76-d3eec80bd1ae_1102.zip",
+  "by_extension": {
+    ".txt": {
+      "files": 96,
+      "bytes": 23197512
+    },
+    ".csv": {
+      "files": 72,
+      "bytes": 17102
+    },
+    ".dll": {
+      "files": 27,
+      "bytes": 23788120
+    },
+    ".exe": {
+      "files": 12,
+      "bytes": 72092672
+    },
+    ".con": {
+      "files": 5,
+      "bytes": 30
+    },
+    ".wav": {
+      "files": 5,
+      "bytes": 336311
+    },
+    ".xml": {
+      "files": 4,
+      "bytes": 18160611
+    },
+    ".ini": {
+      "files": 1,
+      "bytes": 750
+    },
+    ".lnk": {
+      "files": 1,
+      "bytes": 671
+    },
+    "<none>": {
+      "files": 1,
+      "bytes": 3383808
+    }
+  }
+}

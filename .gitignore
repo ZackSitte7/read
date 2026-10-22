@@ -1,0 +1,24 @@
+# Uploads and source archives (never commit)
+.uploads/
+*.zip
+
+# Target binaries and runtime data (never commit)
+target/*
+!target/.gitkeep
+
+# Generated evidence and captures
+artifacts/evidence/
+artifacts/exports/
+artifacts/snapshots/
+
+# Analysis scratch space
+analysis/**/tmp/
+*.log
+*.tmp
+
+# Toolchain / caches
+node_modules/
+.tools/
+__pycache__/
+*.pyc
+.DS_Store
