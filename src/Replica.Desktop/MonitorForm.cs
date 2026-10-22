@@ -21,11 +21,22 @@ internal sealed class AlertHub
 
     public event EventHandler<AlertRecord>? Alerted;
 
+    /// <summary>警报窗里可以关闭提示音。</summary>
+    public bool SoundEnabled { get; set; } = true;
+
     public IReadOnlyList<AlertRecord> Snapshot()
     {
         lock (_sync)
         {
             return _records.ToArray();
+        }
+    }
+
+    public void Clear()
+    {
+        lock (_sync)
+        {
+            _records.Clear();
         }
     }
 
@@ -121,7 +132,36 @@ internal sealed class MonitorForm : Form
 
         _grid.CellClick += (_, e) => LoadRow(e.RowIndex);
         _grid.CellDoubleClick += (_, e) => RemoveRow(e.RowIndex);
+        _grid.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Delete)
+            {
+                RemoveRow(_grid.CurrentRow?.Index ?? -1);
+                e.Handled = true;
+            }
+        };
+        _grid.ContextMenuStrip = BuildGridMenu();
         Controls.Add(_grid);
+    }
+
+    private ContextMenuStrip BuildGridMenu()
+    {
+        var menu = new ContextMenuStrip { Font = Theme.F(20, false, "新宋体") };
+        var edit = menu.Items.Add("修改规则");
+        edit.Click += (_, _) => LoadRow(_grid.CurrentRow?.Index ?? -1);
+        var remove = menu.Items.Add("删除规则");
+        remove.Click += (_, _) => RemoveRow(_grid.CurrentRow?.Index ?? -1);
+        menu.Items.Add(new ToolStripSeparator());
+        var clear = menu.Items.Add("清空全部");
+        clear.Click += (_, _) =>
+        {
+            _rules.Clear();
+            RenderRules();
+            _ctx.Log.Append("监控：已清空全部规则。");
+        };
+        var alert = menu.Items.Add("打开警报窗");
+        alert.Click += (_, _) => OpenAlertWindow();
+        return menu;
     }
 
     private void BuildPanel()
@@ -284,6 +324,7 @@ internal sealed class MonitorForm : Form
             if (i < _grid.Rows.Count)
             {
                 _grid.Rows[i].Cells[6].Value = $"{percent:+0.00;-0.00;0.00}%";
+                _grid.Rows[i].Cells[6].Style.ForeColor = change >= 0 ? Color.Firebrick : Color.SeaGreen;
             }
 
             var hitThreshold = rule.Threshold > 0 && Math.Abs(change) >= rule.Threshold;
@@ -297,7 +338,10 @@ internal sealed class MonitorForm : Form
                     percent,
                     volumeDelta,
                     change));
-                SystemSounds.Exclamation.Play();
+                if (AlertHub.Instance.SoundEnabled)
+                {
+                    SystemSounds.Exclamation.Play();
+                }
             }
 
             rule.BasePrice = quote.LastPrice;
@@ -349,6 +393,9 @@ internal sealed class AlertForm : Form
     private readonly ReplicaContext _ctx;
     private readonly DataGridView _grid = new();
     private readonly ListView _history = new();
+    private readonly CheckBox _sound = new();
+    private readonly Button _clearButton = new();
+    private readonly Label _countLabel = new();
     private readonly int _maxRows = 200;
 
     internal AlertForm(ReplicaContext context)
@@ -365,6 +412,7 @@ internal sealed class AlertForm : Form
 
         BuildGrid();
         BuildHistory();
+        BuildSideControls();
 
         foreach (var record in AlertHub.Instance.Snapshot())
         {
@@ -374,6 +422,53 @@ internal sealed class AlertForm : Form
         AlertHub.Instance.Alerted += OnAlerted;
         FormClosed += (_, _) => AlertHub.Instance.Alerted -= OnAlerted;
     }
+
+    private void BuildSideControls()
+    {
+        _sound.Name = "ChkSound";
+        _sound.Text = "提示音";
+        _sound.Left = Theme.S(418);
+        _sound.Top = Theme.S(6);
+        _sound.Width = Theme.S(72);
+        _sound.Height = Theme.S(26);
+        _sound.Font = Theme.F(20, false, "新宋体");
+        _sound.ForeColor = Color.Teal;
+        _sound.Checked = AlertHub.Instance.SoundEnabled;
+        _sound.CheckedChanged += (_, _) => AlertHub.Instance.SoundEnabled = _sound.Checked;
+
+        _clearButton.Name = "BtClearAlert";
+        _clearButton.Text = "清空";
+        _clearButton.Left = Theme.S(418);
+        _clearButton.Top = Theme.S(38);
+        _clearButton.Width = Theme.S(72);
+        _clearButton.Height = Theme.S(28);
+        _clearButton.Font = Theme.F(20, false, "新宋体");
+        _clearButton.ForeColor = Color.Maroon;
+        _clearButton.FlatStyle = FlatStyle.System;
+        _clearButton.TabStop = false;
+        _clearButton.Click += (_, _) =>
+        {
+            AlertHub.Instance.Clear();
+            _grid.Rows.Clear();
+            _history.Items.Clear();
+            UpdateCount();
+            _ctx.Log.Append("警报窗：已清空记录。");
+        };
+
+        _countLabel.Left = Theme.S(418);
+        _countLabel.Top = Theme.S(74);
+        _countLabel.Width = Theme.S(72);
+        _countLabel.Height = Theme.S(60);
+        _countLabel.Font = Theme.F(18, false, "新宋体");
+        _countLabel.ForeColor = Color.DimGray;
+        _countLabel.TextAlign = ContentAlignment.TopCenter;
+        _countLabel.Text = "0 条";
+
+        Controls.AddRange([_sound, _clearButton, _countLabel]);
+    }
+
+    private void UpdateCount() =>
+        _countLabel.Text = $"{_history.Items.Count} 条";
 
     private void BuildGrid()
     {
@@ -437,6 +532,7 @@ internal sealed class AlertForm : Form
         var percent = $"{record.ChangePercent:+0.00;-0.00;0.00}%";
         _grid.Rows.Insert(0, record.Time.ToString("HH:mm:ss"), record.InstrumentId,
             record.Price.ToString("0.###"), percent);
+        _grid.Rows[0].Cells[3].Style.ForeColor = record.ChangePercent >= 0 ? Color.Firebrick : Color.SeaGreen;
 
         var item = new ListViewItem(record.Time.ToString("HH:mm:ss"));
         item.SubItems.Add(record.InstrumentId);
@@ -456,5 +552,7 @@ internal sealed class AlertForm : Form
         {
             _history.Items.RemoveAt(_history.Items.Count - 1);
         }
+
+        UpdateCount();
     }
 }

@@ -124,6 +124,8 @@ public sealed class MockMarketDataClient : IMarketDataClient
                 BidVolume = 10,
                 AskPrice = basePrice + tick,
                 AskVolume = 10,
+                Bids = BuildDepth(basePrice - tick, tick, 5),
+                Asks = BuildDepth(basePrice + tick, tick, 5),
                 Volume = 0,
                 OpenInterest = 1000,
                 PreSettlementPrice = basePrice,
@@ -174,6 +176,8 @@ public sealed class MockMarketDataClient : IMarketDataClient
                         AskPrice = last + tick,
                         BidVolume = _random.Next(1, 50),
                         AskVolume = _random.Next(1, 50),
+                        Bids = BuildDepth(last - tick, tick, 5),
+                        Asks = BuildDepth(last + tick, tick, 5),
                         Volume = current.Volume + _random.Next(1, 20),
                         OpenInterest = current.OpenInterest + _random.Next(-5, 6),
                         UpdateTime = DateTime.Now,
@@ -188,6 +192,17 @@ public sealed class MockMarketDataClient : IMarketDataClient
         {
             // 正常停止。
         }
+    }
+
+    private IReadOnlyList<DepthLevel> BuildDepth(double nearest, double tick, int count)
+    {
+        var levels = new DepthLevel[count];
+        for (var i = 0; i < count; i++)
+        {
+            levels[i] = new DepthLevel(Math.Round(nearest - i * tick, 4), _random.Next(2, 60));
+        }
+
+        return levels;
     }
 
     private static int StableHash(string value)

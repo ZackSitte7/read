@@ -30,6 +30,7 @@ internal sealed class PointWindow : Form
     private readonly Button _btLegA = new();
     private readonly Button _btLegB = new();
     private readonly System.Windows.Forms.Timer _refresh = new() { Interval = 500 };
+    private readonly ToolTip _tip = new();
 
     private bool _expanded;
     private bool _twoRows = true;
@@ -60,7 +61,41 @@ internal sealed class PointWindow : Form
         MouseMove += DragMove;
         MouseUp += DragEnd;
         DoubleClick += (_, _) => ToggleExpanded();
-        FormClosed += (_, _) => _refresh.Dispose();
+        ContextMenuStrip = BuildMenu();
+        KeyPreview = true;
+        KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Escape && _expanded)
+            {
+                ToggleExpanded();
+                e.Handled = true;
+            }
+        };
+        FormClosed += (_, _) =>
+        {
+            _refresh.Dispose();
+            _tip.Dispose();
+        };
+    }
+
+    private ContextMenuStrip BuildMenu()
+    {
+        var menu = new ContextMenuStrip { Font = Theme.F(17, false, "微软雅黑") };
+        var expand = menu.Items.Add("展开 / 收起");
+        expand.Click += (_, _) => ToggleExpanded();
+        var top = (ToolStripMenuItem)menu.Items.Add("窗口置顶");
+        top.CheckOnClick = true;
+        top.Checked = TopMost;
+        top.Click += (_, _) => TopMost = top.Checked;
+        menu.Items.Add(new ToolStripSeparator());
+        var positions = menu.Items.Add("持仓列表");
+        positions.Click += (_, _) => ShowPositions();
+        var closeRecord = menu.Items.Add("平仓记录");
+        closeRecord.Click += (_, _) => _main.ShowCloseRecords();
+        menu.Items.Add(new ToolStripSeparator());
+        var hide = menu.Items.Add("隐藏");
+        hide.Click += (_, _) => Hide();
+        return menu;
     }
 
     private void BuildControls()
@@ -388,9 +423,19 @@ internal sealed class PointWindow : Form
 
         var summary = _main.PnlSummary();
         _lbUser.Text = summary.Account;
+        _lbUser.ForeColor = _main.Session.IsConnected ? Color.Fuchsia : Color.Silver;
         _lbRyk.Text = $"平 {summary.Closed}";
+        _lbRyk.ForeColor = PnlColor(summary.Closed);
         _lbYk.Text = $"总 {summary.Total}";
+        _lbYk.ForeColor = PnlColor(summary.Total);
+        _tip.SetToolTip(
+            _lbUser,
+            $"账户 {summary.Account}\n浮盈 {summary.Floating}\n平仓 {summary.Closed}\n合计 {summary.Total}\n" +
+            (_main.Session.IsConnected ? "行情已连接" : "行情未连接"));
     }
+
+    private static Color PnlColor(string text) =>
+        text.TrimStart().StartsWith('-') ? Color.FromArgb(0, 140, 60) : Color.FromArgb(200, 40, 40);
 
     private void ShowPositions()
     {
@@ -414,7 +459,11 @@ internal sealed class PositionListForm : Form
         Text = "持仓";
         AutoScaleMode = AutoScaleMode.Dpi;
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(Theme.S(700), Theme.S(420));
+        ClientSize = new Size(Theme.S(700), Theme.S(450));
+        MinimumSize = new Size(Theme.S(520), Theme.S(300));
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = false;
+        MinimizeBox = false;
         Font = Theme.F(18, false, "Segoe UI");
         BackColor = SystemColors.Control;
 
@@ -427,6 +476,10 @@ internal sealed class PositionListForm : Form
             AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
             BackgroundColor = Theme.GridBack,
             Font = Theme.F(20, true, "新宋体"),
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            MultiSelect = false,
+            AllowUserToResizeRows = false,
+            RowTemplate = { Height = Theme.S(26) },
         };
 
         grid.Columns.Add("Id", "合约");
@@ -436,6 +489,10 @@ internal sealed class PositionListForm : Form
         grid.Columns.Add("Last", "最新价");
         grid.Columns.Add("Pnl", "浮动盈亏");
 
+        double totalPnl = 0;
+        var longVolume = 0;
+        var shortVolume = 0;
+
         foreach (var position in positions)
         {
             var multiple = Math.Max(1, instruments.Find(position.InstrumentId)?.VolumeMultiple ?? 1);
@@ -443,15 +500,46 @@ internal sealed class PositionListForm : Form
                 ? (position.LastPrice - position.AvgPrice) * position.Volume * multiple
                 : (position.AvgPrice - position.LastPrice) * position.Volume * multiple;
 
-            grid.Rows.Add(
+            totalPnl += pnl;
+            if (position.Direction == PositionDirection.Long)
+            {
+                longVolume += position.Volume;
+            }
+            else
+            {
+                shortVolume += position.Volume;
+            }
+
+            var index = grid.Rows.Add(
                 position.InstrumentId,
                 position.Direction == PositionDirection.Long ? "多" : "空",
                 position.Volume,
                 position.AvgPrice.ToString("0.###"),
                 position.LastPrice.ToString("0.###"),
-                pnl.ToString("0.00"));
+                pnl.ToString("+0.00;-0.00;0.00"));
+
+            var row = grid.Rows[index];
+            row.DefaultCellStyle.ForeColor = position.Direction == PositionDirection.Long
+                ? Color.FromArgb(140, 20, 20)
+                : Color.FromArgb(20, 110, 60);
+            row.Cells[5].Style.ForeColor = pnl >= 0 ? Color.Firebrick : Color.SeaGreen;
+            row.Cells[5].Style.Font = Theme.F(20, true, "新宋体");
         }
 
+        var footer = new Label
+        {
+            Dock = DockStyle.Bottom,
+            Height = Theme.S(30),
+            Text = $"共 {positions.Count} 条持仓    多 {longVolume} 手 / 空 {shortVolume} 手    " +
+                   $"合计浮动盈亏 {totalPnl:+0.00;-0.00;0.00}",
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = Theme.F(20, true, "新宋体"),
+            ForeColor = totalPnl >= 0 ? Color.Firebrick : Color.SeaGreen,
+            BackColor = SystemColors.Control,
+            Padding = new Padding(Theme.S(6), 0, 0, 0),
+        };
+
         Controls.Add(grid);
+        Controls.Add(footer);
     }
 }

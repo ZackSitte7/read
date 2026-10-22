@@ -12,6 +12,8 @@ internal sealed class CloseRecordForm : Form
 {
     private readonly ReplicaContext _ctx;
     private readonly RecordGrid _grid;
+    private readonly Label _stats = new();
+    private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
 
     internal CloseRecordForm(ReplicaContext context)
     {
@@ -20,7 +22,7 @@ internal sealed class CloseRecordForm : Form
         Text = "平仓";
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
-        ClientSize = new Size(Theme.S(1067), Theme.S(894));
+        ClientSize = new Size(Theme.S(1067), Theme.S(924));
         MinimumSize = new Size(Theme.S(600), Theme.S(300));
         StartPosition = FormStartPosition.CenterParent;
         BackColor = Color.Gainsboro;
@@ -35,20 +37,66 @@ internal sealed class CloseRecordForm : Form
         };
 
         _grid.RecordsProvider = LoadRecords;
+
+        var footer = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = Theme.S(30),
+            BackColor = Color.Gainsboro,
+        };
+
+        _stats.Dock = DockStyle.Fill;
+        _stats.TextAlign = ContentAlignment.MiddleLeft;
+        _stats.Font = Theme.F(20, true, "新宋体");
+        _stats.ForeColor = Color.DimGray;
+        _stats.Padding = new Padding(Theme.S(8), 0, 0, 0);
+        _stats.Text = "暂无平仓记录";
+        footer.Controls.Add(_stats);
+
         Controls.Add(_grid);
+        Controls.Add(footer);
 
         _ctx.Log.Appended += OnLogAppended;
-        FormClosed += (_, _) => _ctx.Log.Appended -= OnLogAppended;
+        FormClosed += (_, _) =>
+        {
+            _ctx.Log.Appended -= OnLogAppended;
+            _timer.Dispose();
+        };
+
+        UpdateStats();
+        _timer.Tick += (_, _) => UpdateStats();
+        _timer.Start();
     }
 
     private IReadOnlyList<CloseRecord> LoadRecords() =>
         _ctx.MockTrade?.GetCloseRecords() ?? [];
+
+    private void UpdateStats()
+    {
+        var records = LoadRecords();
+        if (records.Count == 0)
+        {
+            _stats.Text = "暂无平仓记录";
+            _stats.ForeColor = Color.DimGray;
+            return;
+        }
+
+        var total = records.Sum(r => r.Pnl);
+        var wins = records.Count(r => r.Pnl > 0);
+        var rate = wins * 100.0 / records.Count;
+        var volume = records.Sum(r => r.Volume);
+        _stats.Text = $"共 {records.Count} 笔    手数 {volume}    " +
+                      $"总盈亏 {total:+0.00;-0.00;0.00}    胜率 {rate:0.0}%    " +
+                      $"盈利 {wins} 笔 / 亏损 {records.Count - wins} 笔";
+        _stats.ForeColor = total >= 0 ? Color.Firebrick : Color.SeaGreen;
+    }
 
     private void OnLogAppended(object? sender, string line)
     {
         if (!IsDisposed && line.Contains("成交", StringComparison.Ordinal))
         {
             _grid.Invalidate();
+            UpdateStats();
         }
     }
 }

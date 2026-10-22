@@ -18,6 +18,8 @@ public sealed class CtpTradeClient : ITradeClient
 
     public event EventHandler<Position>? PositionUpdated;
 
+    public event EventHandler<TradingAccountSnapshot>? AccountUpdated;
+
     public event EventHandler<ConnectionState>? ConnectionChanged;
 #pragma warning restore CS0067
 
@@ -65,6 +67,16 @@ public sealed class CtpTradeClient : ITradeClient
 
         // 原生桥接层将在这里调用 ReqQryInvestorPosition。
         throw new NotSupportedException("CTP 原生桥接层尚未接入，无法查询持仓。");
+    }
+
+    public Task<TradingAccountSnapshot?> QueryAccountAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        EnsureConnected();
+
+        // 原生桥接层将在这里调用 ReqQryTradingAccount。
+        throw new NotSupportedException("CTP 原生桥接层尚未接入，无法查询资金。");
     }
 
     public Task DisconnectAsync(CancellationToken cancellationToken = default)

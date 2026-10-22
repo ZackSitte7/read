@@ -21,4 +21,7 @@ internal sealed class ReplicaContext
     public bool IsMock { get; init; }
 
     public Replica.Core.Mock.MockTradeClient? MockTrade { get; init; }
+
+    /// <summary>TqSdk 桥接客户端；非 TqSdk 登录时为 null。</summary>
+    public Replica.TqSdk.TqSdkBridgeClient? TqSdk { get; init; }
 }

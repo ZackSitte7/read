@@ -21,7 +21,9 @@ internal sealed class ControlCenterForm : Form
     private readonly CheckBox _top5 = new();
     private readonly CheckBox _align = new();
     private readonly Label _time = new();
+    private readonly Label _count = new();
     private Button _market = new();
+    private MonitorForm? _monitor;
     private readonly WinFormsTimer _clock = new() { Interval = 500 };
     private readonly List<string> _ids = [];
 
@@ -69,16 +71,18 @@ internal sealed class ControlCenterForm : Form
         _contractList.Left = Theme.S(662);
         _contractList.Top = 0;
         _contractList.Width = Theme.S(605);
-        _contractList.Height = Theme.S(600);
+        _contractList.Height = Theme.S(570);
         _contractList.View = View.Details;
         _contractList.FullRowSelect = true;
         _contractList.GridLines = true;
         _contractList.HideSelection = false;
         _contractList.MultiSelect = false;
         _contractList.Font = Theme.F(24);
-        _contractList.Columns.Add("ID", Theme.S(180));
-        _contractList.Columns.Add("Name", Theme.S(250));
-        _contractList.Columns.Add("成交量", Theme.S(125));
+        _contractList.Columns.Add("ID", Theme.S(140));
+        _contractList.Columns.Add("Name", Theme.S(170));
+        _contractList.Columns.Add("成交量", Theme.S(90), HorizontalAlignment.Right);
+        _contractList.Columns.Add("最新价", Theme.S(95), HorizontalAlignment.Right);
+        _contractList.Columns.Add("涨跌幅", Theme.S(95), HorizontalAlignment.Right);
         _contractList.ColumnClick += (_, e) =>
         {
             if (_sortColumn == e.Column)
@@ -96,6 +100,21 @@ internal sealed class ControlCenterForm : Form
         _contractList.SelectedIndexChanged += (_, _) =>
             _market.Enabled = _contractList.SelectedItems.Count > 0;
         _contractList.DoubleClick += (_, _) => SendToLadder();
+        _contractList.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                SendToLadder();
+                e.Handled = true;
+            }
+            else if (e.Control && e.KeyCode == Keys.F)
+            {
+                _search.Focus();
+                _search.SelectAll();
+                e.Handled = true;
+            }
+        };
+        _contractList.ContextMenuStrip = BuildContextMenu();
 
         _time.Left = Theme.S(65);
         _time.Top = Theme.S(605);
@@ -217,11 +236,28 @@ internal sealed class ControlCenterForm : Form
             _main.RefreshVolumeList();
         };
 
+        var monitor = Theme.MakeButton(this, "BtMonitor", Theme.S(1222), Theme.S(605), Theme.S(39), Theme.S(33),
+            "M", Theme.F(20, false, "新宋体"), Theme.Delphi(16233578));
+        monitor.Click += (_, _) => OpenMonitor();
+
+        _count.Left = Theme.S(662);
+        _count.Top = Theme.S(572);
+        _count.Width = Theme.S(605);
+        _count.Height = Theme.S(26);
+        _count.AutoSize = false;
+        _count.Font = Theme.F(20, false, "新宋体");
+        _count.ForeColor = Color.DimGray;
+        _count.BackColor = Color.Transparent;
+        _count.TextAlign = ContentAlignment.MiddleLeft;
+        _count.Text = "共 0 个合约";
+
         Controls.AddRange(
         [
             _syslog,
             _contractList,
+            _count,
             _time,
+            monitor,
             saveExit,
             allClose,
             userInfo,
@@ -238,6 +274,40 @@ internal sealed class ControlCenterForm : Form
             _top5,
             refreshVol,
         ]);
+    }
+
+    private ContextMenuStrip BuildContextMenu()
+    {
+        var menu = new ContextMenuStrip { Font = Theme.F(20, false, "新宋体") };
+        var toLadder = menu.Items.Add("送入行情梯");
+        toLadder.Click += (_, _) => SendToLadder();
+        var copy = menu.Items.Add("复制合约代码");
+        copy.Click += (_, _) =>
+        {
+            var id = SelectedId();
+            if (id is not null)
+            {
+                Clipboard.SetText(id);
+                _ctx.Log.Append($"控制台：已复制合约代码 {id}。");
+            }
+        };
+        menu.Items.Add(new ToolStripSeparator());
+        var openMonitor = menu.Items.Add("打开监控窗口");
+        openMonitor.Click += (_, _) => OpenMonitor();
+        return menu;
+    }
+
+    private void OpenMonitor()
+    {
+        if (_monitor is { IsDisposed: false })
+        {
+            _monitor.Activate();
+            return;
+        }
+
+        _monitor = new MonitorForm(_ctx);
+        _monitor.FormClosed += (_, _) => _monitor = null;
+        _monitor.Show(this);
     }
 
     private void RefreshList()
@@ -285,11 +355,21 @@ internal sealed class ControlCenterForm : Form
                         ? items.OrderBy(i => _main.Session.GetQuote(i.InstrumentId)?.Volume ?? 0)
                         : items.OrderByDescending(i => _main.Session.GetQuote(i.InstrumentId)?.Volume ?? 0))
                     .ToList(),
+                3 => (_sortAscending
+                        ? items.OrderBy(i => _main.Session.GetQuote(i.InstrumentId)?.LastPrice ?? 0)
+                        : items.OrderByDescending(i => _main.Session.GetQuote(i.InstrumentId)?.LastPrice ?? 0))
+                    .ToList(),
+                4 => (_sortAscending
+                        ? items.OrderBy(i => ChangePercent(i.InstrumentId))
+                        : items.OrderByDescending(i => ChangePercent(i.InstrumentId)))
+                    .ToList(),
                 _ => (_sortAscending
                         ? items.OrderBy(i => i.InstrumentId, StringComparer.OrdinalIgnoreCase)
                         : items.OrderByDescending(i => i.InstrumentId, StringComparer.OrdinalIgnoreCase))
                     .ToList(),
             };
+
+            UpdateColumnCaptions();
 
             _contractList.BeginUpdate();
             _contractList.Items.Clear();
@@ -297,13 +377,25 @@ internal sealed class ControlCenterForm : Form
             foreach (var instrument in items)
             {
                 _ids.Add(instrument.InstrumentId);
+                var quote = _main.Session.GetQuote(instrument.InstrumentId);
                 var item = new ListViewItem(instrument.InstrumentId);
                 item.SubItems.Add(instrument.Name ?? string.Empty);
-                item.SubItems.Add((_main.Session.GetQuote(instrument.InstrumentId)?.Volume ?? 0).ToString());
+                item.SubItems.Add((quote?.Volume ?? 0).ToString());
+                item.SubItems.Add(quote is null ? "-" : quote.LastPrice.ToString("0.###"));
+                item.SubItems.Add(FormatPercent(ChangePercent(instrument.InstrumentId)));
+                if (quote is not null && quote.PreSettlementPrice > 0)
+                {
+                    item.ForeColor = quote.LastPrice >= quote.PreSettlementPrice
+                        ? Color.Firebrick
+                        : Color.SeaGreen;
+                }
+
                 _contractList.Items.Add(item);
             }
 
             _contractList.EndUpdate();
+            _count.Text = $"共 {_ctx.Instruments.All.Count} 个合约，当前显示 {items.Count} 个" +
+                          $"（{(_main.Session.IsConnected ? "已连接" : "未连接")}）";
 
             if (selected is not null)
             {
@@ -311,6 +403,7 @@ internal sealed class ControlCenterForm : Form
                 if (index >= 0)
                 {
                     _contractList.Items[index].Selected = true;
+                    _contractList.EnsureVisible(index);
                 }
             }
         }
@@ -320,12 +413,51 @@ internal sealed class ControlCenterForm : Form
         }
     }
 
-    private void RefreshVolumes()
+    private static readonly string[] ColumnCaptions = ["ID", "Name", "成交量", "最新价", "涨跌幅"];
+
+    private void UpdateColumnCaptions()
+    {
+        for (var i = 0; i < ColumnCaptions.Length && i < _contractList.Columns.Count; i++)
+        {
+            _contractList.Columns[i].Text = i == _sortColumn
+                ? ColumnCaptions[i] + (_sortAscending ? " ▲" : " ▼")
+                : ColumnCaptions[i];
+        }
+    }
+
+    private double ChangePercent(string instrumentId)
+    {
+        var quote = _main.Session.GetQuote(instrumentId);
+        if (quote is null || quote.PreSettlementPrice <= 0)
+        {
+            return 0;
+        }
+
+        return (quote.LastPrice - quote.PreSettlementPrice) / quote.PreSettlementPrice * 100;
+    }
+
+    private static string FormatPercent(double percent) =>
+        percent.ToString("+0.00;-0.00;0.00") + "%";
+
+    private void RefreshQuotes()
     {
         for (var i = 0; i < _contractList.Items.Count && i < _ids.Count; i++)
         {
-            var volume = _main.Session.GetQuote(_ids[i])?.Volume ?? 0;
-            _contractList.Items[i].SubItems[2].Text = volume.ToString();
+            var id = _ids[i];
+            var quote = _main.Session.GetQuote(id);
+            var item = _contractList.Items[i];
+            if (quote is null)
+            {
+                continue;
+            }
+
+            var percent = ChangePercent(id);
+            item.SubItems[2].Text = quote.Volume.ToString();
+            item.SubItems[3].Text = quote.LastPrice.ToString("0.###");
+            item.SubItems[4].Text = FormatPercent(percent);
+            item.ForeColor = quote.PreSettlementPrice > 0
+                ? (quote.LastPrice >= quote.PreSettlementPrice ? Color.Firebrick : Color.SeaGreen)
+                : Color.Black;
         }
     }
 
@@ -417,7 +549,7 @@ internal sealed class ControlCenterForm : Form
         _time.Text = DateTime.Now.ToString("HH:mm:ss");
         if (!_refreshing)
         {
-            RefreshVolumes();
+            RefreshQuotes();
         }
     }
 
@@ -430,6 +562,11 @@ internal sealed class ControlCenterForm : Form
         _clock.Stop();
         _clock.Dispose();
         _ctx.Log.Appended -= OnLogAppended;
+        if (_monitor is { IsDisposed: false })
+        {
+            _monitor.Close();
+        }
+
         base.OnFormClosed(e);
     }
 }

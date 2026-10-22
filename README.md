@@ -81,6 +81,25 @@ dotnet run --project src/Replica.Simulator -c Release
 桌面端运行后勾选“使用模拟行情与模拟撮合”即可在无 CTP 环境下操作；
 CTP 适配层当前为骨架，原生桥接层 `ReplicaCtpBridge` 尚未接入。
 
+### TqSdk 行情
+
+桌面端默认行情通道为 **TqSdk（天勤）**，通过 `bridge/tqsdk_bridge.py`
+子进程与 C# 以 JSON Lines 通信，行情与交易共享同一个 `TqApi`。
+
+1. 目标机安装 Python 3.10+ 与 `tqsdk`：双击 `install-tqsdk.bat`，或执行
+   `python -m pip install -U tqsdk`。
+2. 账号写入 `config/tqsdk.local.json`（已被 `.gitignore` 排除，不入库）：
+
+   ```json
+   { "user": "alyzc26", "password": "130100", "tradeMode": "kq" }
+   ```
+
+   `tradeMode`：`none` 仅行情、`kq` 快期模拟、`account` 实盘。
+3. 登录窗选择「TqSdk 天勤行情」+「TqSdk 快期模拟」即可；没有 Python 时可选
+   「TqSdk 本地模拟行情」走内置撮合引擎（`--sim`），无需任何依赖。
+
+发布目录包含 `bridge/tqsdk_bridge.py`、`tqsdk.local.json` 与安装脚本。
+
 ## 目标样本
 
 - 主程序：`target/1102/0931.exe`（2026-10-15，最新版本）

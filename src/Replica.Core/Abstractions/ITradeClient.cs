@@ -11,6 +11,9 @@ public interface ITradeClient : IAsyncDisposable
 
     event EventHandler<Position>? PositionUpdated;
 
+    /// <summary>资金权益变化；不支持资金查询的适配器不会触发。</summary>
+    event EventHandler<TradingAccountSnapshot>? AccountUpdated;
+
     event EventHandler<ConnectionState>? ConnectionChanged;
 
     bool IsConnected { get; }
@@ -22,6 +25,9 @@ public interface ITradeClient : IAsyncDisposable
     Task CancelOrderAsync(string orderId, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<Position>> QueryPositionsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>查询资金权益；返回 null 表示该适配器不支持。</summary>
+    Task<TradingAccountSnapshot?> QueryAccountAsync(CancellationToken cancellationToken = default);
 
     Task DisconnectAsync(CancellationToken cancellationToken = default);
 }

@@ -19,12 +19,20 @@ internal sealed class MainForm : Form
 
     private readonly PriceLadder _ladder = new();
     private readonly WinFormsTimer _clock = new() { Interval = 250 };
+    private readonly WinFormsTimer _poll = new() { Interval = 2000 };
 
     private readonly Dictionary<string, double> _lastPrices = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Order> _orders = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<(string InstrumentId, PositionDirection Direction), Position> _positions = [];
     private readonly List<string> _contracts = [];
     private readonly List<Control> _hiddenExtras = [];
+
+    private TradingAccountSnapshot? _account;
+    private bool _polling;
+    private bool _connected = true;
+    private int _cancelCount;
+    private bool _closeArmed;
+    private DateTime _closeDeadline;
 
     private Label _lbCcyk = null!;
     private Label _lbPcyk = null!;
@@ -122,6 +130,8 @@ internal sealed class MainForm : Form
 
         _clock.Tick += (_, _) => OnClockTick();
         _clock.Start();
+        _poll.Tick += async (_, _) => await PollAsync();
+        _poll.Start();
         OnClockTick();
 
         Shown += (_, _) =>
@@ -261,7 +271,8 @@ internal sealed class MainForm : Form
 
         _lbClose60 = ClickLabel("LBClose60", -5, 917, 130, 51, string.Empty, Theme.F(40, true),
             Theme.Delphi(8388863), null, ContentAlignment.MiddleCenter);
-        _lbClose60.Click += (_, _) => _log.Append("60 秒平仓窗口。");
+        _lbClose60.Tag = "close60";
+        _lbClose60.Click += (_, _) => ToggleClose60();
         _hiddenExtras.Add(_lbClose60);
 
         _txSprdId = Edit("TXCntrbySprdID", 32, 395, 99, 32, string.Empty, Theme.F(24, false, "宋体"),
@@ -351,10 +362,11 @@ internal sealed class MainForm : Form
             Left = Theme.S(131),
             Top = Theme.S(733),
             Width = Theme.S(292),
-            Height = Theme.S(10),
-            BackColor = Color.Black,
+            Height = 3,
+            BackColor = Color.FromArgb(240, 200, 40),
             Visible = false,
         };
+        _pLine.Click += (_, _) => ResetScroll();
         Controls.Add(_pLine);
         _hiddenExtras.Add(_pLine);
 
@@ -499,6 +511,13 @@ internal sealed class MainForm : Form
             ? DateTime.Now.ToString("HH:mm:ss")
             : (DateTime.Now - _clockBase).ToString(@"hh\:mm\:ss");
 
+        if (_pLine.Visible)
+        {
+            _pLine.Left = _ladder.Left;
+            _pLine.Width = _ladder.Width;
+            _pLine.Top = _ladder.Top + _ladder.CenterRowTop;
+        }
+
         UpdateInfo();
     }
 
@@ -508,7 +527,77 @@ internal sealed class MainForm : Form
         _session.OrderUpdated += OnOrderUpdated;
         _session.TradeReceived += OnTradeReceived;
         _session.PositionUpdated += OnPositionUpdated;
+        _session.AccountUpdated += OnAccountUpdated;
+        _session.ConnectionChanged += OnConnectionChanged;
         _session.Log += (_, message) => _log.Append(message);
+    }
+
+    private void OnAccountUpdated(object? sender, TradingAccountSnapshot account) =>
+        RunOnUi(() =>
+        {
+            _account = account;
+            UpdateInfo();
+        });
+
+    private void OnConnectionChanged(object? sender, ConnectionState state) =>
+        RunOnUi(() =>
+        {
+            _connected = state == ConnectionState.Connected;
+            _lbLoadFlag.Text = state switch
+            {
+                ConnectionState.Connected => "已连接",
+                ConnectionState.Connecting => "连接中......",
+                ConnectionState.Faulted => "连接异常",
+                _ => "已断开",
+            };
+            _lbLoadFlag.ForeColor = state == ConnectionState.Connected
+                ? Theme.Delphi(8388863)
+                : Color.OrangeRed;
+        });
+
+    /// <summary>定时拉取持仓与资金：TqSdk 不主动推送持仓变更，只能轮询。</summary>
+    private async Task PollAsync()
+    {
+        if (_polling || _closing || _session.Account is null)
+        {
+            return;
+        }
+
+        _polling = true;
+        try
+        {
+            var positions = await _session.QueryPositionsAsync();
+            var account = await _session.QueryAccountAsync();
+
+            RunOnUi(() =>
+            {
+                _positions.Clear();
+                foreach (var position in positions)
+                {
+                    _positions[(position.InstrumentId, position.Direction)] = position;
+                }
+
+                if (account is not null)
+                {
+                    _account = account;
+                }
+
+                _ladder.Invalidate();
+                UpdateInfo();
+            });
+        }
+        catch (ObjectDisposedException)
+        {
+            // 窗体正在关闭。
+        }
+        catch (Exception ex)
+        {
+            _log.Append($"持仓/资金刷新失败：{ex.Message}");
+        }
+        finally
+        {
+            _polling = false;
+        }
     }
 
     private void UpdateInfo()
@@ -523,16 +612,26 @@ internal sealed class MainForm : Form
         var instrument = _instruments.Find(active);
         var quote = _session.GetQuote(active);
 
-        _lbData.Text = instrument is null
-            ? active
-            : $"{instrument.Name}\n{instrument.InstrumentId}";
-
-        if (quote is not null)
+        if (quote is null)
+        {
+            _lbData.Text = instrument is null
+                ? active
+                : $"{instrument.Name}\n{instrument.InstrumentId}";
+        }
+        else
         {
             var reference = quote.PreSettlementPrice > 0 ? quote.PreSettlementPrice : quote.LastPrice;
             var pct = reference > 0 ? (quote.LastPrice - reference) / reference : 0;
+            _lbData.Text =
+                $"{instrument?.Name ?? active}\n{active}\n{quote.LastPrice:0.##}  " +
+                $"{pct.ToString("+0.00%;-0.00%;0.00%")}";
             _lbZdf.Text = pct.ToString("+0.00%;-0.00%;0.00%");
-            _lbZdf.BackColor = pct >= 0 ? Theme.ChangeBack : Theme.RedBack;
+            _lbZdf.BackColor = pct > 0 ? Theme.ChangeBack : pct < 0 ? Theme.RedBack : Theme.ModeBack;
+            _lbData.BackColor = pct > 0
+                ? Color.FromArgb(255, 224, 178)
+                : pct < 0
+                    ? Color.FromArgb(196, 232, 204)
+                    : Theme.DataBack;
         }
 
         var up = 0;
@@ -558,12 +657,40 @@ internal sealed class MainForm : Form
         _lbRed.Text = up.ToString();
         _lbBlue.Text = down.ToString();
         _lbHqCount.Text = _quoteCount.ToString();
-        _lbGroup.Text = $"分组: {_group}";
-        _lbCjJc.Text = $"成交:{_tradeCount}";
+        _lbGroup.Text = _ladder.ActiveInstrument is { Length: > 0 } current ? $"分组: {_group}\n{current}" : $"分组: {_group}";
+        _lbCjJc.Text = _account is null
+            ? $"成交 {_tradeCount}  撤 {_cancelCount}"
+            : $"成交 {_tradeCount}  撤 {_cancelCount}\n权益 {_account.Balance:0}";
         _lbSyMode.Text = _soundMode.ToString();
         _lbCjSyMode.Text = _offsetMode.ToString();
+        _lbCdCount.Text = _cancelCount.ToString();
+        _lbLoadFlag.Text = _connected
+            ? (_session.Account?.UserId is { Length: > 0 } user ? $"已连接 {user}" : "已连接")
+            : "连接异常";
+        _lbLoadFlag.ForeColor = _connected ? Theme.Delphi(8388863) : Color.OrangeRed;
 
+        UpdateCloseCountdown();
         UpdatePnl(active);
+    }
+
+    private void UpdateCloseCountdown()
+    {
+        if (!_closeArmed)
+        {
+            return;
+        }
+
+        var remaining = _closeDeadline - DateTime.Now;
+        if (remaining <= TimeSpan.Zero)
+        {
+            _closeArmed = false;
+            _lbClose60.Text = "平仓中";
+            _log.Append("60 秒平仓倒计时结束，提交全部平仓。");
+            _ = CloseAllPositionsAsync();
+            return;
+        }
+
+        _lbClose60.Text = Math.Ceiling(remaining.TotalSeconds).ToString("0");
     }
 
     private void UpdatePnl(string active)
@@ -584,7 +711,12 @@ internal sealed class MainForm : Form
         }
 
         double closed = 0;
-        if (_ctx.MockTrade is { } mock)
+        if (_account is not null)
+        {
+            floating = _account.FloatProfit;
+            closed = _account.CloseProfit;
+        }
+        else if (_ctx.MockTrade is { } mock)
         {
             foreach (var record in mock.GetCloseRecords())
             {
@@ -606,6 +738,7 @@ internal sealed class MainForm : Form
         }
 
         _lbCcyk.Text = floating.ToString("0.00");
+        _lbCcyk.ForeColor = floating >= 0 ? Color.Red : Color.Lime;
         _lbPcyk.Text = closed.ToString("0.00");
         _lbJt.Text = net.ToString("+0;-0;0");
         _lbPzjt.Text = (floating + closed).ToString("0");
@@ -743,7 +876,11 @@ internal sealed class MainForm : Form
                 1 => OffsetFlag.Close,
                 _ => OffsetFlag.CloseToday,
             };
-            var type = IsOn(_cbMorderX) ? OrderType.Market : OrderType.Limit;
+            var type = IsOn(_cbFok)
+                ? OrderType.Fok
+                : IsOn(_cbMorderX)
+                    ? OrderType.Market
+                    : OrderType.Limit;
             var request = new OrderRequest
             {
                 InstrumentId = e.InstrumentId,
@@ -755,10 +892,16 @@ internal sealed class MainForm : Form
             };
 
             var order = await _session.PlaceOrderAsync(request);
+            var typeText = type switch
+            {
+                OrderType.Market => "市价",
+                OrderType.Fok => $"FOK {e.Price:0.##}",
+                OrderType.Fak => $"FAK {e.Price:0.##}",
+                _ => e.Price.ToString("0.##"),
+            };
             _log.Append(
                 $"行情梯下单：{e.InstrumentId} {DirText(e.Direction)} {OffsetText(offset)} " +
-                $"{volume}手 @ {(type == OrderType.Market ? "市价" : e.Price.ToString("0.##"))} " +
-                $"→ {order.StatusMessage}");
+                $"{volume}手 @ {typeText} → {order.StatusMessage}");
 
             if (IsOn(_cbJcQh))
             {
@@ -886,7 +1029,33 @@ internal sealed class MainForm : Form
         _contracts.Clear();
         _contracts.AddRange(slice);
         _ladder.SetContracts(_contracts);
+
+        var missing = slice
+            .Where(id => !_session.Subscriptions.Contains(id, StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+        if (missing.Length > 0)
+        {
+            _ = SubscribeSafeAsync(missing);
+        }
+
         UpdateInfo();
+    }
+
+    private async Task SubscribeSafeAsync(IReadOnlyList<string> instrumentIds)
+    {
+        try
+        {
+            await _session.SubscribeAsync(instrumentIds);
+            RunOnUi(() =>
+            {
+                _ladder.Invalidate();
+                UpdateInfo();
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.Append($"订阅失败：{ex.Message}");
+        }
     }
 
     private void ReloadContracts()
@@ -970,6 +1139,23 @@ internal sealed class MainForm : Form
         });
     }
 
+    /// <summary>60 秒平仓倒计时：第一次点击开始，倒计时中再次点击取消。</summary>
+    private void ToggleClose60()
+    {
+        if (_closeArmed)
+        {
+            _closeArmed = false;
+            _lbClose60.Text = string.Empty;
+            _log.Append("60 秒平仓已取消。");
+            return;
+        }
+
+        _closeArmed = true;
+        _closeDeadline = DateTime.Now.AddSeconds(60);
+        _lbClose60.Text = "60";
+        _log.Append("60 秒平仓倒计时开始，再次点击可取消。");
+    }
+
     private void CycleSoundMode()
     {
         _soundMode = (_soundMode + 1) % 3;
@@ -1013,6 +1199,7 @@ internal sealed class MainForm : Form
             try
             {
                 await _session.CancelOrderAsync(order.OrderId);
+                _cancelCount++;
             }
             catch (Exception ex)
             {
@@ -1020,6 +1207,7 @@ internal sealed class MainForm : Form
             }
         }
 
+        _lbCdCount.Text = _cancelCount.ToString();
         _log.Append($"已撤 {working.Length} 笔委托。");
     }
 
@@ -1102,6 +1290,11 @@ internal sealed class MainForm : Form
             _ladder.SetActiveColumn(index);
         }
 
+        if (!_session.Subscriptions.Contains(instrumentId, StringComparer.OrdinalIgnoreCase))
+        {
+            _ = SubscribeSafeAsync([instrumentId]);
+        }
+
         Activate();
     }
 
@@ -1148,6 +1341,7 @@ internal sealed class MainForm : Form
             try
             {
                 await _session.CancelOrderAsync(order.OrderId);
+                _cancelCount++;
             }
             catch (Exception ex)
             {
@@ -1155,6 +1349,7 @@ internal sealed class MainForm : Form
             }
         }
 
+        _lbCdCount.Text = _cancelCount.ToString();
         _log.Append($"已撤当前分组 {orders.Length} 笔委托。");
     }
 
@@ -1403,6 +1598,7 @@ internal sealed class MainForm : Form
     {
         _closing = true;
         _clock.Stop();
+        _poll.Stop();
         base.OnFormClosing(e);
     }
 
@@ -1412,8 +1608,11 @@ internal sealed class MainForm : Form
         _session.OrderUpdated -= OnOrderUpdated;
         _session.TradeReceived -= OnTradeReceived;
         _session.PositionUpdated -= OnPositionUpdated;
+        _session.AccountUpdated -= OnAccountUpdated;
+        _session.ConnectionChanged -= OnConnectionChanged;
 
         _clock.Dispose();
+        _poll.Dispose();
         _ladder.Dispose();
 
         try

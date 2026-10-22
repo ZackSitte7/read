@@ -21,6 +21,12 @@ public enum OrderType
 {
     Limit,
     Market,
+
+    /// <summary>立即成交剩余撤销（FAK）。</summary>
+    Fak,
+
+    /// <summary>全部成交否则撤销（FOK）。</summary>
+    Fok,
 }
 
 /// <summary>委托状态。</summary>

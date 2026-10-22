@@ -9,5 +9,25 @@
   <ItemGroup>
     <ProjectReference Include="..\Replica.Core\Replica.Core.csproj" />
     <ProjectReference Include="..\Replica.Ctp\Replica.Ctp.csproj" />
+    <ProjectReference Include="..\Replica.TqSdk\Replica.TqSdk.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\bridge\tqsdk_bridge.py"
+          Link="bridge\tqsdk_bridge.py"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\config\tqsdk.local.json"
+          Link="tqsdk.local.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Condition="Exists('..\..\config\tqsdk.local.json')" />
+    <None Include="..\..\config\tqsdk.local.example.json"
+          Link="tqsdk.local.example.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\scripts\install-tqsdk.bat"
+          Link="install-tqsdk.bat"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

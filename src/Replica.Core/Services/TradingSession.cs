@@ -26,6 +26,7 @@ public sealed class TradingSession : IAsyncDisposable
         _trade.OrderUpdated += HandleOrderUpdated;
         _trade.TradeReceived += HandleTradeReceived;
         _trade.PositionUpdated += HandlePositionUpdated;
+        _trade.AccountUpdated += HandleAccountUpdated;
         _trade.ConnectionChanged += HandleConnectionChanged;
     }
 
@@ -36,6 +37,8 @@ public sealed class TradingSession : IAsyncDisposable
     public event EventHandler<Trade>? TradeReceived;
 
     public event EventHandler<Position>? PositionUpdated;
+
+    public event EventHandler<TradingAccountSnapshot>? AccountUpdated;
 
     public event EventHandler<ConnectionState>? ConnectionChanged;
 
@@ -137,6 +140,13 @@ public sealed class TradingSession : IAsyncDisposable
         return _trade.QueryPositionsAsync(cancellationToken);
     }
 
+    public Task<TradingAccountSnapshot?> QueryAccountAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return _trade.QueryAccountAsync(cancellationToken);
+    }
+
     public Quote? GetQuote(string instrumentId) =>
         _quotes.TryGetValue(instrumentId, out var quote) ? quote : null;
 
@@ -153,6 +163,7 @@ public sealed class TradingSession : IAsyncDisposable
         _trade.OrderUpdated -= HandleOrderUpdated;
         _trade.TradeReceived -= HandleTradeReceived;
         _trade.PositionUpdated -= HandlePositionUpdated;
+        _trade.AccountUpdated -= HandleAccountUpdated;
         _trade.ConnectionChanged -= HandleConnectionChanged;
 
         try
@@ -191,6 +202,9 @@ public sealed class TradingSession : IAsyncDisposable
 
     private void HandlePositionUpdated(object? sender, Position position) =>
         PositionUpdated?.Invoke(this, position);
+
+    private void HandleAccountUpdated(object? sender, TradingAccountSnapshot account) =>
+        AccountUpdated?.Invoke(this, account);
 
     private void HandleConnectionChanged(object? sender, ConnectionState state) =>
         ConnectionChanged?.Invoke(this, state);

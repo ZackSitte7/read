@@ -1,0 +1,10 @@
+{
+  "user": "your_tqsdk_user",
+  "password": "your_tqsdk_password",
+  "tradeMode": "kq",
+  "broker": "",
+  "account": "",
+  "tradePassword": "",
+  "pythonPath": "",
+  "simulated": "false"
+}

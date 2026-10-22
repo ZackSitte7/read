@@ -10,6 +10,9 @@ internal sealed class RecordListForm : Form
 {
     private readonly Func<IReadOnlyList<RecordEntry>> _provider;
     private readonly RecordListBox _list = new();
+    private readonly Label _count = new();
+    private readonly CheckBox _freeze = new();
+    private readonly Button _copy = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
 
     internal RecordListForm(
@@ -33,6 +36,36 @@ internal sealed class RecordListForm : Form
         BackColor = SystemColors.Control;
         Font = Theme.F(17, false, "MS Sans Serif");
 
+        var header = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = Theme.S(26),
+            BackColor = SystemColors.Control,
+        };
+
+        _count.Parent = header;
+        _count.SetBounds(Theme.S(4), 0, Theme.S(78), Theme.S(24));
+        _count.Font = Theme.F(17, false, "新宋体");
+        _count.ForeColor = Color.DimGray;
+        _count.TextAlign = ContentAlignment.MiddleLeft;
+        _count.Text = "共 0 条";
+
+        _freeze.Parent = header;
+        _freeze.SetBounds(Theme.S(82), Theme.S(2), Theme.S(58), Theme.S(22));
+        _freeze.Text = "冻结";
+        _freeze.Font = Theme.F(17, false, "新宋体");
+        _freeze.ForeColor = Color.Teal;
+        _freeze.CheckedChanged += (_, _) => _timer.Enabled = !_freeze.Checked;
+
+        _copy.Parent = header;
+        _copy.SetBounds(Theme.S(142), Theme.S(1), Theme.S(58), Theme.S(23));
+        _copy.Text = "复制";
+        _copy.Font = Theme.F(17, false, "新宋体");
+        _copy.ForeColor = Color.Maroon;
+        _copy.FlatStyle = FlatStyle.System;
+        _copy.TabStop = false;
+        _copy.Click += (_, _) => CopySelected();
+
         _list.Name = listName;
         _list.Dock = DockStyle.Fill;
         _list.DrawMode = DrawMode.OwnerDrawFixed;
@@ -40,12 +73,31 @@ internal sealed class RecordListForm : Form
         _list.Font = Theme.F(20, false, "新宋体");
         _list.BorderStyle = BorderStyle.None;
         _list.IntegralHeight = false;
+        _list.DoubleClick += (_, _) => CopySelected();
         Controls.Add(_list);
+        Controls.Add(header);
 
         RefreshItems();
         _timer.Tick += (_, _) => RefreshItems();
         _timer.Start();
         FormClosed += (_, _) => _timer.Dispose();
+    }
+
+    private void CopySelected()
+    {
+        if (_list.SelectedItem is not RecordEntry entry)
+        {
+            return;
+        }
+
+        try
+        {
+            Clipboard.SetText(entry.Text);
+        }
+        catch (Exception)
+        {
+            // 剪贴板被其他进程占用时忽略。
+        }
     }
 
     private void RefreshItems()
@@ -56,6 +108,7 @@ internal sealed class RecordListForm : Form
         }
 
         var entries = _provider();
+        _count.Text = $"共 {entries.Count} 条";
         if (entries.Count == _list.Items.Count && entries.Count > 0)
         {
             var same = true;
@@ -123,6 +176,9 @@ internal sealed class MinuteBarsForm : Form
     private readonly Replica.Core.Services.TradingSession _session;
     private readonly DataGridView _grid = new();
     private readonly List<Row> _rows = [];
+    private readonly Label _count = new();
+    private readonly CheckBox _pause = new();
+    private readonly Button _clear = new();
     private readonly object _sync = new();
 
     private sealed record Row(
@@ -156,6 +212,8 @@ internal sealed class MinuteBarsForm : Form
         _grid.Font = Theme.F(18, false, "新宋体");
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _grid.RowTemplate.Height = Theme.S(25);
+        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(246, 246, 246);
 
         _grid.Columns.Add("Time", "时间");
         _grid.Columns.Add("Id", "合约");
@@ -164,7 +222,54 @@ internal sealed class MinuteBarsForm : Form
         _grid.Columns.Add("Ask", "卖价");
         _grid.Columns.Add("Volume", "成交量");
         _grid.Columns.Add("Oi", "持仓量");
+
+        var header = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = Theme.S(30),
+            BackColor = SystemColors.Control,
+        };
+
+        _count.Parent = header;
+        _count.SetBounds(Theme.S(6), 0, Theme.S(240), Theme.S(28));
+        _count.Font = Theme.F(18, false, "新宋体");
+        _count.ForeColor = Color.DimGray;
+        _count.TextAlign = ContentAlignment.MiddleLeft;
+        _count.Text = "共 0 条（上限 200）";
+
+        _pause.Parent = header;
+        _pause.SetBounds(Theme.S(500), Theme.S(4), Theme.S(70), Theme.S(24));
+        _pause.Text = "暂停";
+        _pause.Font = Theme.F(18, false, "新宋体");
+        _pause.ForeColor = Color.Teal;
+        _pause.CheckedChanged += (_, _) =>
+        {
+            if (!_pause.Checked)
+            {
+                RenderAll();
+            }
+        };
+
+        _clear.Parent = header;
+        _clear.SetBounds(Theme.S(578), Theme.S(3), Theme.S(80), Theme.S(25));
+        _clear.Text = "清空";
+        _clear.Font = Theme.F(18, false, "新宋体");
+        _clear.ForeColor = Color.Maroon;
+        _clear.FlatStyle = FlatStyle.System;
+        _clear.TabStop = false;
+        _clear.Click += (_, _) =>
+        {
+            lock (_sync)
+            {
+                _rows.Clear();
+            }
+
+            _grid.Rows.Clear();
+            _count.Text = "共 0 条（上限 200）";
+        };
+
         Controls.Add(_grid);
+        Controls.Add(header);
 
         _session.QuoteUpdated += OnQuoteUpdated;
         FormClosed += (_, _) => _session.QuoteUpdated -= OnQuoteUpdated;
@@ -181,24 +286,31 @@ internal sealed class MinuteBarsForm : Form
         {
             BeginInvoke(() =>
             {
+                var row = new Row(
+                    quote.UpdateTime == default ? DateTime.Now.ToString("HH:mm:ss") : quote.UpdateTime.ToString("HH:mm:ss"),
+                    quote.InstrumentId,
+                    quote.LastPrice,
+                    quote.BidPrice,
+                    quote.AskPrice,
+                    quote.Volume,
+                    quote.OpenInterest);
+
                 lock (_sync)
                 {
-                    _rows.Insert(0, new Row(
-                        quote.UpdateTime == default ? DateTime.Now.ToString("HH:mm:ss") : quote.UpdateTime.ToString("HH:mm:ss"),
-                        quote.InstrumentId,
-                        quote.LastPrice,
-                        quote.BidPrice,
-                        quote.AskPrice,
-                        quote.Volume,
-                        quote.OpenInterest));
-
+                    _rows.Insert(0, row);
                     if (_rows.Count > 200)
                     {
-                        _rows.RemoveRange(200, _rows.Count - 200);
+                        _rows.RemoveAt(_rows.Count - 1);
                     }
                 }
 
-                Render();
+                _count.Text = $"共 {_rows.Count} 条（上限 200）";
+                if (_pause.Checked)
+                {
+                    return;
+                }
+
+                InsertRow(row);
             });
         }
         catch (InvalidOperationException)
@@ -207,15 +319,43 @@ internal sealed class MinuteBarsForm : Form
         }
     }
 
-    private void Render()
+    private void InsertRow(Row row)
+    {
+        var index = _grid.Rows.Add(
+            row.Time,
+            row.InstrumentId,
+            row.Last.ToString("0.###"),
+            row.Bid.ToString("0.###"),
+            row.Ask.ToString("0.###"),
+            row.Volume.ToString("0"),
+            row.OpenInterest.ToString("0"));
+
+        var added = _grid.Rows[index];
+        if (row.Last >= row.Ask && row.Ask > 0)
+        {
+            added.Cells[2].Style.ForeColor = Color.Firebrick;
+        }
+        else if (row.Last <= row.Bid && row.Bid > 0)
+        {
+            added.Cells[2].Style.ForeColor = Color.SeaGreen;
+        }
+
+        while (_grid.Rows.Count > 200)
+        {
+            _grid.Rows.RemoveAt(0);
+        }
+    }
+
+    private void RenderAll()
     {
         _grid.SuspendLayout();
         _grid.Rows.Clear();
         lock (_sync)
         {
-            foreach (var row in _rows)
+            for (var i = _rows.Count - 1; i >= 0; i--)
             {
-                _grid.Rows.Add(
+                var row = _rows[i];
+                var index = _grid.Rows.Add(
                     row.Time,
                     row.InstrumentId,
                     row.Last.ToString("0.###"),
@@ -223,6 +363,15 @@ internal sealed class MinuteBarsForm : Form
                     row.Ask.ToString("0.###"),
                     row.Volume.ToString("0"),
                     row.OpenInterest.ToString("0"));
+
+                if (row.Last >= row.Ask && row.Ask > 0)
+                {
+                    _grid.Rows[index].Cells[2].Style.ForeColor = Color.Firebrick;
+                }
+                else if (row.Last <= row.Bid && row.Bid > 0)
+                {
+                    _grid.Rows[index].Cells[2].Style.ForeColor = Color.SeaGreen;
+                }
             }
         }
 

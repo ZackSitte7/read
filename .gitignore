@@ -33,3 +33,7 @@ obj/
 
 # Release packages
 release/
+
+# Local TqSdk credentials (never commit)
+config/tqsdk.local.json
+tqsdk.local.json

@@ -30,6 +30,10 @@ public sealed class MockTradeClient : ITradeClient
 
     public event EventHandler<Position>? PositionUpdated;
 
+#pragma warning disable CS0067 // 模拟账户不推送资金快照。
+    public event EventHandler<TradingAccountSnapshot>? AccountUpdated;
+#pragma warning restore CS0067
+
     public event EventHandler<ConnectionState>? ConnectionChanged;
 
     public bool IsConnected { get; private set; }
@@ -171,6 +175,14 @@ public sealed class MockTradeClient : ITradeClient
                 .ToArray();
             return Task.FromResult(snapshot);
         }
+    }
+
+    /// <summary>模拟账户不维护资金明细，返回 null 由上层按持仓自行估算。</summary>
+    public Task<TradingAccountSnapshot?> QueryAccountAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return Task.FromResult<TradingAccountSnapshot?>(null);
     }
 
     /// <summary>平仓记录快照，供平仓记录窗展示。</summary>

@@ -5,6 +5,7 @@ using Replica.Core.Mock;
 using Replica.Core.Models;
 using Replica.Core.Services;
 using Replica.Ctp;
+using Replica.TqSdk;
 
 namespace Replica.Desktop;
 
@@ -44,6 +45,7 @@ public sealed class LoginForm : Form
     private readonly string _usersPath;
     private readonly string _configPath;
     private readonly DesktopConfig _config;
+    private readonly TqSdkLocalSettings _tq = TqSdkLocalSettings.Load();
     private IReadOnlyList<Account> _accounts = [];
     private InstrumentRepository _instruments = InstrumentRepository.Default;
     private Account? _selectedAccount;
@@ -57,6 +59,19 @@ public sealed class LoginForm : Form
         _configPath = Path.Combine(AppContext.BaseDirectory, "config.ini");
         _config = DesktopConfig.Load(_configPath);
         _accounts = UserRepository.LoadOrSeed(_usersPath);
+        if (_tq.User.Length > 0)
+        {
+            var tqAccount = new Account
+            {
+                BrokerId = "TQSDK",
+                UserId = _tq.User,
+                DisplayName = $"TqSdk {_tq.User}",
+                MarketFront = "tqsdk://market",
+                TradeFront = $"tqsdk://{_tq.TradeMode}",
+            };
+            _accounts = [tqAccount, .. _accounts.Where(a => a.BrokerId != "TQSDK")];
+        }
+
         _instruments = LoadInstruments();
 
         Text = "YY交易";
@@ -281,6 +296,8 @@ public sealed class LoginForm : Form
     {
         var marketServers = new[]
         {
+            new ServerItem("TqSdk 天勤行情", "tqsdk://market"),
+            new ServerItem("TqSdk 本地模拟行情", "tqsdk-sim://market"),
             new ServerItem("本地模拟行情", "mock://market"),
             new ServerItem("SimNow 7x24 行情", "tcp://180.168.146.187:10211"),
             new ServerItem("SimNow 电信 行情", "tcp://180.168.146.187:10213"),
@@ -289,6 +306,10 @@ public sealed class LoginForm : Form
 
         var tradeServers = new[]
         {
+            new ServerItem("TqSdk 快期模拟", "tqsdk://kq"),
+            new ServerItem("TqSdk 实盘账户", "tqsdk://account"),
+            new ServerItem("TqSdk 仅行情", "tqsdk://none"),
+            new ServerItem("TqSdk 本地模拟", "tqsdk-sim://kq"),
             new ServerItem("本地模拟交易", "mock://trade"),
             new ServerItem("SimNow 7x24 交易", "tcp://180.168.146.187:10130"),
             new ServerItem("SimNow 电信 交易", "tcp://180.168.146.187:10131"),
@@ -353,10 +374,37 @@ public sealed class LoginForm : Form
             var account = _selectedAccount;
             _log.Append(
                 $"选择用户 {account.DisplayName}：{account.BrokerId}/{account.UserId}，行情 {account.MarketFront}");
-            if (string.IsNullOrWhiteSpace(_password.Text) &&
+
+            if (string.Equals(account.BrokerId, "TQSDK", StringComparison.OrdinalIgnoreCase))
+            {
+                SelectServer(_marketList, "tqsdk://market");
+                SelectServer(_tradeList, $"tqsdk://{_tq.TradeMode}");
+                if (_password.TextLength == 0)
+                {
+                    _password.Text = _tq.Password;
+                }
+
+                _log.Append($"TqSdk 账号 {_tq.User}，交易模式 {_tq.TradeMode}，凭据取自本机配置。");
+            }
+            else if (string.IsNullOrWhiteSpace(_password.Text) &&
                 account.MarketFront.StartsWith("mock://", StringComparison.OrdinalIgnoreCase))
             {
                 _password.Text = "mock";
+            }
+        }
+    }
+
+    private static void SelectServer(ListView list, string address)
+    {
+        foreach (ListViewItem item in list.Items)
+        {
+            if (item.Tag is ServerItem server &&
+                string.Equals(server.Address, address, StringComparison.OrdinalIgnoreCase))
+            {
+                item.Selected = true;
+                item.Focused = true;
+                list.EnsureVisible(item.Index);
+                return;
             }
         }
     }
@@ -396,9 +444,10 @@ public sealed class LoginForm : Form
 
     private static async Task<int?> MeasureAsync(string address)
     {
-        if (address.StartsWith("mock://", StringComparison.OrdinalIgnoreCase))
+        if (address.StartsWith("mock://", StringComparison.OrdinalIgnoreCase) ||
+            address.StartsWith("tqsdk", StringComparison.OrdinalIgnoreCase))
         {
-            return 1;
+            return address.StartsWith("tqsdk-sim", StringComparison.OrdinalIgnoreCase) ? 1 : null;
         }
 
         string host;
@@ -445,10 +494,20 @@ public sealed class LoginForm : Form
         var marketServer = (ServerItem)_marketList.SelectedItems[0].Tag!;
         var tradeServer = (ServerItem)_tradeList.SelectedItems[0].Tag!;
         var password = _password.Text;
-        var isMock = marketServer.Address.StartsWith("mock://", StringComparison.OrdinalIgnoreCase) &&
+        var isTqSdkMarket = marketServer.Address.StartsWith("tqsdk", StringComparison.OrdinalIgnoreCase);
+        var isTqSdkTrade = tradeServer.Address.StartsWith("tqsdk", StringComparison.OrdinalIgnoreCase);
+        if (isTqSdkMarket != isTqSdkTrade)
+        {
+            _log.Append("TqSdk 行情与交易服务需要成对选择，请重新选择。");
+            return;
+        }
+
+        var isTqSdk = isTqSdkMarket;
+        var isMock = !isTqSdk &&
+                     marketServer.Address.StartsWith("mock://", StringComparison.OrdinalIgnoreCase) &&
                      tradeServer.Address.StartsWith("mock://", StringComparison.OrdinalIgnoreCase);
 
-        if (!isMock && password.Length == 0)
+        if (!isMock && !isTqSdk && password.Length == 0)
         {
             _log.Append("实盘登录需要输入密码。");
             _password.Focus();
@@ -461,7 +520,7 @@ public sealed class LoginForm : Form
         {
             var account = _selectedAccount with
             {
-                Password = password,
+                Password = isTqSdk && password.Length == 0 ? _tq.Password : password,
                 MarketFront = marketServer.Address,
                 TradeFront = tradeServer.Address,
             };
@@ -469,11 +528,15 @@ public sealed class LoginForm : Form
             _log.Append($"开始登录：{account.DisplayName} / {account.BrokerId}:{account.UserId}");
             _log.Append($"行情 {marketServer.Address}，交易 {tradeServer.Address}");
 
-            (IMarketDataClient market, ITradeClient trade, MockTradeClient? mock) =
-                CreateClients(marketServer.Address, tradeServer.Address, isMock);
+            TradingSession? sessionRef = null;
+            var quoteProvider = new Func<string, Quote?>(id => sessionRef?.GetQuote(id));
+
+            (IMarketDataClient market, ITradeClient trade, MockTradeClient? mock, TqSdkBridgeClient? tq) =
+                CreateClients(marketServer.Address, tradeServer.Address, isMock, account, password, quoteProvider);
 
             var session = new TradingSession(market, trade);
             created = session;
+            sessionRef = session;
             session.Log += (_, message) => _log.Append(message);
 
             if (mock is not null)
@@ -485,7 +548,7 @@ public sealed class LoginForm : Form
             {
                 await session.ConnectAsync(account);
             }
-            catch when (_backupCheck.Checked && !isMock)
+            catch when (_backupCheck.Checked && !isMock && !isTqSdk)
             {
                 _log.Append("主服务连接失败，尝试备用服务。");
                 var backupMarket = FindBackup(_marketList, marketServer);
@@ -496,9 +559,16 @@ public sealed class LoginForm : Form
                 }
 
                 await session.DisposeAsync();
-                (market, trade, mock) = CreateClients(backupMarket.Address, backupTrade.Address, false);
+                (market, trade, mock, tq) = CreateClients(
+                    backupMarket.Address,
+                    backupTrade.Address,
+                    false,
+                    account,
+                    password,
+                    quoteProvider);
                 session = new TradingSession(market, trade);
                 created = session;
+                sessionRef = session;
                 session.Log += (_, message) => _log.Append(message);
                 account = account with
                 {
@@ -508,9 +578,12 @@ public sealed class LoginForm : Form
                 await session.ConnectAsync(account);
             }
 
-            var ids = _instruments.All.Select(i => i.InstrumentId).ToArray();
+            var allIds = _instruments.All.Select(i => i.InstrumentId).ToArray();
+            var ids = isTqSdk ? allIds.Take(80).ToArray() : allIds;
             await session.SubscribeAsync(ids);
-            _log.Append($"合约载入完成：{ids.Length} 个。");
+            _log.Append(isTqSdk && ids.Length < allIds.Length
+                ? $"合约载入完成：订阅 {ids.Length}/{allIds.Length} 个（TqSdk 仅订阅当前分组可见范围）。"
+                : $"合约载入完成：{ids.Length} 个。");
 
             _session = session;
             SaveLoginConfig(marketServer, tradeServer, account);
@@ -525,6 +598,7 @@ public sealed class LoginForm : Form
                 ConfigPath = _configPath,
                 IsMock = isMock,
                 MockTrade = mock,
+                TqSdk = tq,
             };
 
             var main = new MainForm(context);
@@ -562,20 +636,62 @@ public sealed class LoginForm : Form
         }
     }
 
-    private static (IMarketDataClient Market, ITradeClient Trade, MockTradeClient? Mock) CreateClients(
-        string marketFront,
-        string tradeFront,
-        bool isMock)
+    private (IMarketDataClient Market, ITradeClient Trade, MockTradeClient? Mock, TqSdkBridgeClient? Tq)
+        CreateClients(
+            string marketFront,
+            string tradeFront,
+            bool isMock,
+            Account account,
+            string password,
+            Func<string, Quote?> quoteProvider)
     {
         if (isMock)
         {
-            IMarketDataClient market = new MockMarketDataClient(InstrumentRepository.Default);
-            var provider = new Func<string, Quote?>(_ => null);
-            var mockTrade = new MockTradeClient(id => provider(id));
-            return (market, mockTrade, mockTrade);
+            IMarketDataClient market = new MockMarketDataClient(_instruments);
+            var mockTrade = new MockTradeClient(quoteProvider);
+            return (market, mockTrade, mockTrade, null);
         }
 
-        return (new CtpMarketDataClient(), new CtpTradeClient(), null);
+        if (marketFront.StartsWith("tqsdk", StringComparison.OrdinalIgnoreCase))
+        {
+            var simulated = marketFront.StartsWith("tqsdk-sim", StringComparison.OrdinalIgnoreCase) ||
+                            tradeFront.StartsWith("tqsdk-sim", StringComparison.OrdinalIgnoreCase);
+            var separator = tradeFront.IndexOf("://", StringComparison.Ordinal);
+            var mode = separator >= 0 ? tradeFront[(separator + 3)..] : "kq";
+            if (mode is not ("kq" or "account" or "none"))
+            {
+                mode = "kq";
+            }
+
+            var user = _tq.User.Length > 0 ? _tq.User : account.UserId;
+            if (user.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    "未配置 TqSdk 账号。请编辑账号或在 config/tqsdk.local.json 中填写。");
+            }
+
+            var secret = password.Length > 0 && !string.Equals(password, "mock", StringComparison.Ordinal)
+                ? password
+                : _tq.Password;
+
+            var options = new TqSdkOptions
+            {
+                Simulated = simulated,
+                AuthUser = user,
+                AuthPassword = secret,
+                TradeMode = mode,
+                Broker = _tq.Broker,
+                TradeAccount = _tq.Account.Length > 0 ? _tq.Account : user,
+                TradePassword = _tq.TradePassword.Length > 0 ? _tq.TradePassword : secret,
+                PythonPath = _tq.PythonPath,
+            };
+
+            var client = new TqSdkBridgeClient(options, _instruments.All);
+            client.Log += (_, message) => _log.Append($"[TqSdk] {message}");
+            return (client, client, null, client);
+        }
+
+        return (new CtpMarketDataClient(), new CtpTradeClient(), null, null);
     }
 
     private static ServerItem? FindBackup(ListView list, ServerItem current)
