@@ -34,4 +34,7 @@ obj/
 # Release packages
 release/
 
+# 内置 Python 运行时（体积大，由 scripts/make-release.sh 打入发布包）
+runtime/
+
 # TqSdk 账号配置：按用户要求随仓库保存，便于后续直接使用

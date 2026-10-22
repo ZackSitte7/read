@@ -86,9 +86,10 @@ CTP 适配层当前为骨架，原生桥接层 `ReplicaCtpBridge` 尚未接入�
 桌面端默认行情通道为 **TqSdk（天勤）**，通过 `bridge/tqsdk_bridge.py`
 子进程与 C# 以 JSON Lines 通信，行情与交易共享同一个 `TqApi`。
 
-1. 目标机安装 Python 3.10+ 与 `tqsdk`：双击 `install-tqsdk.bat`，或执行
-   `python -m pip install -U tqsdk`。若首次登录时检测到缺少 `tqsdk`，
-   程序会自动执行 `pip install -U tqsdk` 并重试，日志中可见 pip 输出。
+1. 发布包已内置 Python 3.11 运行时与 `tqsdk`（位于 `python/` 目录），
+   目标机无需安装 Python，直接运行 exe 即可。源码方式运行时若缺少 `tqsdk`，
+   程序会自动执行 `pip install -U tqsdk` 并重试，日志中可见 pip 输出；
+   也可手动双击 `install-tqsdk.bat`。
 2. 账号写入 `config/tqsdk.local.json`（随仓库保存，发布时自动复制到程序目录）：
 
    ```json

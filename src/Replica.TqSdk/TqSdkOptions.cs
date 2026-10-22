@@ -29,10 +29,29 @@ public sealed record TqSdkOptions
 
     public string TradePassword { get; init; } = string.Empty;
 
-    public static string DefaultPythonPath =>
-        Environment.GetEnvironmentVariable("REPLICA_PYTHON") is { Length: > 0 } configured && File.Exists(configured)
-            ? configured
-            : OperatingSystem.IsWindows() ? "python" : "python3";
+    /// <summary>
+    /// 优先使用随程序打包的 Python 运行时（python\python.exe），
+    /// 其次使用环境变量 REPLICA_PYTHON，最后回退到系统 Python。
+    /// </summary>
+    public static string DefaultPythonPath
+    {
+        get
+        {
+            if (Environment.GetEnvironmentVariable("REPLICA_PYTHON") is { Length: > 0 } configured &&
+                File.Exists(configured))
+            {
+                return configured;
+            }
+
+            var bundled = Path.Combine(AppContext.BaseDirectory, "python", "python.exe");
+            if (File.Exists(bundled))
+            {
+                return bundled;
+            }
+
+            return OperatingSystem.IsWindows() ? "python" : "python3";
+        }
+    }
 
     /// <summary>从程序目录向上查找 bridge/tqsdk_bridge.py。</summary>
     public string ResolveScriptPath()
