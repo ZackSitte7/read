@@ -1,0 +1,12 @@
+/workspace/src/Replica.Core/bin/Release/net8.0/Replica.Core.deps.json
+/workspace/src/Replica.Core/bin/Release/net8.0/Replica.Core.dll
+/workspace/src/Replica.Core/obj/Release/net8.0/Replica.Core.GeneratedMSBuildEditorConfig.editorconfig
+/workspace/src/Replica.Core/obj/Release/net8.0/Replica.Core.AssemblyInfoInputs.cache
+/workspace/src/Replica.Core/obj/Release/net8.0/Replica.Core.AssemblyInfo.cs
+/workspace/src/Replica.Core/obj/Release/net8.0/Replica.Core.csproj.CoreCompileInputs.cache
+/workspace/src/Replica.Core/obj/Release/net8.0/Replica.Core.dll
+/workspace/src/Replica.Core/obj/Release/net8.0/refint/Replica.Core.dll
+/workspace/src/Replica.Core/obj/Release/net8.0/ref/Replica.Core.dll
+/workspace/src/Replica.Core/bin/Release/net8.0/Replica.Core.pdb
+/workspace/src/Replica.Core/obj/Release/net8.0/Replica.Core.sourcelink.json
+/workspace/src/Replica.Core/obj/Release/net8.0/Replica.Core.pdb

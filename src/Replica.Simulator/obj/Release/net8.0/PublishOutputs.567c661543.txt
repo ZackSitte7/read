@@ -1,0 +1,7 @@
+/tmp/replica-publish/simulator/Replica.Simulator
+/tmp/replica-publish/simulator/Replica.Simulator.dll
+/tmp/replica-publish/simulator/Replica.Simulator.deps.json
+/tmp/replica-publish/simulator/Replica.Simulator.runtimeconfig.json
+/tmp/replica-publish/simulator/Replica.Simulator.pdb
+/tmp/replica-publish/simulator/Replica.Core.dll
+/tmp/replica-publish/simulator/Replica.Core.pdb

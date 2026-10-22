@@ -1,0 +1,1 @@
+/workspace/release/Replica-Desktop-win-x64/Replica.Desktop.exe

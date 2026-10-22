@@ -1,0 +1,9 @@
+/tmp/replica-publish/desktop/Replica.Desktop
+/tmp/replica-publish/desktop/Replica.Desktop.dll
+/tmp/replica-publish/desktop/Replica.Desktop.deps.json
+/tmp/replica-publish/desktop/Replica.Desktop.runtimeconfig.json
+/tmp/replica-publish/desktop/Replica.Desktop.pdb
+/tmp/replica-publish/desktop/Replica.Core.dll
+/tmp/replica-publish/desktop/Replica.Ctp.dll
+/tmp/replica-publish/desktop/Replica.Core.pdb
+/tmp/replica-publish/desktop/Replica.Ctp.pdb

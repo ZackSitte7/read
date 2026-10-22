@@ -1,0 +1,9 @@
+/tmp/replica-publish/desktop-standalone/Replica.Desktop.pdb
+/tmp/replica-publish/desktop-standalone/D3DCompiler_47_cor3.dll
+/tmp/replica-publish/desktop-standalone/PenImc_cor3.dll
+/tmp/replica-publish/desktop-standalone/PresentationNative_cor3.dll
+/tmp/replica-publish/desktop-standalone/vcruntime140_cor3.dll
+/tmp/replica-publish/desktop-standalone/wpfgfx_cor3.dll
+/tmp/replica-publish/desktop-standalone/Replica.Core.pdb
+/tmp/replica-publish/desktop-standalone/Replica.Ctp.pdb
+/tmp/replica-publish/desktop-standalone/Replica.Desktop.exe

@@ -1,0 +1,12 @@
+/workspace/src/Replica.Ctp/bin/Release/net8.0/Replica.Ctp.deps.json
+/workspace/src/Replica.Ctp/bin/Release/net8.0/Replica.Ctp.dll
+/workspace/src/Replica.Ctp/bin/Release/net8.0/Replica.Core.dll
+/workspace/src/Replica.Ctp/obj/Release/net8.0/Replica.Ctp.csproj.AssemblyReference.cache
+/workspace/src/Replica.Ctp/obj/Release/net8.0/Replica.Ctp.GeneratedMSBuildEditorConfig.editorconfig
+/workspace/src/Replica.Ctp/obj/Release/net8.0/Replica.Ctp.AssemblyInfoInputs.cache
+/workspace/src/Replica.Ctp/obj/Release/net8.0/Replica.Ctp.AssemblyInfo.cs
+/workspace/src/Replica.Ctp/obj/Release/net8.0/Replica.Ctp.csproj.CoreCompileInputs.cache
+/workspace/src/Replica.Ctp/obj/Release/net8.0/Replica..4D1B5615.Up2Date
+/workspace/src/Replica.Ctp/obj/Release/net8.0/Replica.Ctp.dll
+/workspace/src/Replica.Ctp/obj/Release/net8.0/refint/Replica.Ctp.dll
+/workspace/src/Replica.Ctp/obj/Release/net8.0/ref/Replica.Ctp.dll
