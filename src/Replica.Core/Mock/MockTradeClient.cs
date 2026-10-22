@@ -4,14 +4,15 @@ using Replica.Core.Models;
 namespace Replica.Core.Mock;
 
 /// <summary>
-/// 模拟交易客户端：市价单立即成交，可成交限价单立即成交，其余挂单等待撤单。
-/// 用于在没有 CTP 前置的情况下验证登录、下单、成交、持仓链路。
+/// 模拟交易客户端：市价单与可成交限价单立即成交，其余委托挂在本地订单簿，
+/// 行情价格穿过委托价时成交。用于在没有 CTP 前置的情况下验证登录、下单、成交、持仓链路。
 /// </summary>
 public sealed class MockTradeClient : ITradeClient
 {
     private readonly Func<string, Quote?> _quoteProvider;
     private readonly Dictionary<string, Order> _orders = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<(string InstrumentId, PositionDirection Direction), Position> _positions = [];
+    private readonly List<CloseRecord> _closes = [];
     private readonly object _gate = new();
 
     private int _orderSequence;
@@ -75,7 +76,8 @@ public sealed class MockTradeClient : ITradeClient
 
         if (request.Type == OrderType.Market)
         {
-            Fill(order, request, quote);
+            var price = request.Direction == OrderDirection.Buy ? quote.AskPrice : quote.BidPrice;
+            Fill(order, price);
             return Task.FromResult(order);
         }
 
@@ -85,10 +87,54 @@ public sealed class MockTradeClient : ITradeClient
 
         if (marketable)
         {
-            Fill(order, request, quote);
+            var price = request.Direction == OrderDirection.Buy
+                ? Math.Min(request.Price, quote.AskPrice)
+                : Math.Max(request.Price, quote.BidPrice);
+            Fill(order, price);
         }
 
         return Task.FromResult(order);
+    }
+
+    /// <summary>行情更新时撮合本地挂单，对应原软件中报单随行情被动成交的行为。</summary>
+    public void OnQuote(Quote quote)
+    {
+        List<(Order Order, double Price)> matches = [];
+
+        lock (_gate)
+        {
+            foreach (var order in _orders.Values)
+            {
+                if (order.Status != OrderStatus.Pending ||
+                    order.Type != OrderType.Limit ||
+                    !string.Equals(order.InstrumentId, quote.InstrumentId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                double? fillPrice = null;
+                if (order.Direction == OrderDirection.Buy && quote.AskPrice <= order.Price)
+                {
+                    fillPrice = Math.Min(order.Price, quote.AskPrice);
+                }
+                else if (order.Direction == OrderDirection.Sell && quote.BidPrice >= order.Price)
+                {
+                    fillPrice = Math.Max(order.Price, quote.BidPrice);
+                }
+
+                if (fillPrice is { } price)
+                {
+                    // 先占位，避免同一笔委托被连续两个行情 tick 重复成交。
+                    order.Status = OrderStatus.PartiallyFilled;
+                    matches.Add((order, price));
+                }
+            }
+        }
+
+        foreach (var (order, price) in matches)
+        {
+            Fill(order, price);
+        }
     }
 
     public Task CancelOrderAsync(string orderId, CancellationToken cancellationToken = default)
@@ -127,6 +173,15 @@ public sealed class MockTradeClient : ITradeClient
         }
     }
 
+    /// <summary>平仓记录快照，供平仓记录窗展示。</summary>
+    public IReadOnlyList<CloseRecord> GetCloseRecords()
+    {
+        lock (_gate)
+        {
+            return _closes.ToArray();
+        }
+    }
+
     public Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
         if (!IsConnected)
@@ -146,25 +201,21 @@ public sealed class MockTradeClient : ITradeClient
         return ValueTask.CompletedTask;
     }
 
-    private void Fill(Order order, OrderRequest request, Quote quote)
+    private void Fill(Order order, double fillPrice)
     {
-        var fillPrice = request.Type == OrderType.Market
-            ? request.Direction == OrderDirection.Buy ? quote.AskPrice : quote.BidPrice
-            : request.Direction == OrderDirection.Buy
-                ? Math.Min(request.Price, quote.AskPrice)
-                : Math.Max(request.Price, quote.BidPrice);
-
         Position? affected = null;
+        var rejected = false;
+
         lock (_gate)
         {
-            if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)
+            if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected or OrderStatus.Filled)
             {
                 return;
             }
 
-            if (request.Offset == OffsetFlag.Open)
+            if (order.Offset == OffsetFlag.Open)
             {
-                var direction = request.Direction == OrderDirection.Buy
+                var direction = order.Direction == OrderDirection.Buy
                     ? PositionDirection.Long
                     : PositionDirection.Short;
                 affected = GetOrCreatePosition(order.InstrumentId, direction);
@@ -172,7 +223,7 @@ public sealed class MockTradeClient : ITradeClient
             }
             else
             {
-                var direction = request.Direction == OrderDirection.Buy
+                var direction = order.Direction == OrderDirection.Buy
                     ? PositionDirection.Short
                     : PositionDirection.Long;
                 affected = GetOrCreatePosition(order.InstrumentId, direction);
@@ -182,17 +233,42 @@ public sealed class MockTradeClient : ITradeClient
                     order.Status = OrderStatus.Rejected;
                     order.StatusMessage = "可平持仓不足";
                     order.UpdateTime = DateTime.Now;
-                    RaiseOrder(order);
-                    return;
+                    rejected = true;
                 }
-
-                ApplyClose(affected, fillPrice, order.Volume);
+                else
+                {
+                    var openPrice = affected.AvgPrice;
+                    ApplyClose(affected, fillPrice, order.Volume);
+                    _closes.Add(
+                        new CloseRecord
+                        {
+                            InstrumentId = order.InstrumentId,
+                            Direction = direction,
+                            OpenPrice = openPrice,
+                            ClosePrice = fillPrice,
+                            Volume = order.Volume,
+                            Time = DateTime.Now,
+                        });
+                    if (_closes.Count > 4000)
+                    {
+                        _closes.RemoveRange(0, _closes.Count - 4000);
+                    }
+                }
             }
 
-            order.TradedVolume = order.Volume;
-            order.Status = OrderStatus.Filled;
-            order.StatusMessage = "全部成交";
-            order.UpdateTime = DateTime.Now;
+            if (!rejected)
+            {
+                order.TradedVolume = order.Volume;
+                order.Status = OrderStatus.Filled;
+                order.StatusMessage = "全部成交";
+                order.UpdateTime = DateTime.Now;
+            }
+        }
+
+        if (rejected)
+        {
+            RaiseOrder(order);
+            return;
         }
 
         var trade = new Trade

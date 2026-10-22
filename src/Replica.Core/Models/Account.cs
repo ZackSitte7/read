@@ -14,6 +14,9 @@ public sealed record Account
 
     public string DisplayName { get; init; } = string.Empty;
 
+    /// <summary>CTP 认证 AppID（柜台认证，不是厂商授权码）。</summary>
+    public string AppId { get; init; } = string.Empty;
+
     /// <summary>交易前置地址。</summary>
     public string TradeFront { get; init; } = string.Empty;
 

@@ -30,3 +30,6 @@ __pycache__/
 bin/
 obj/
 *.user
+
+# Release packages
+release/

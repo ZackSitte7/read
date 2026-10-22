@@ -5,6 +5,9 @@ public sealed record Instrument
 {
     public required string InstrumentId { get; init; }
 
+    /// <summary>合约中文名，对应原软件合约列表的 Name 列。</summary>
+    public string Name { get; init; } = string.Empty;
+
     public string ExchangeId { get; init; } = string.Empty;
 
     public string ProductId { get; init; } = string.Empty;

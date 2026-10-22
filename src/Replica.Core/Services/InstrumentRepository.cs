@@ -41,57 +41,41 @@ public sealed class InstrumentRepository
     /// <summary>内置示例合约，保证在没有样本文件时也能运行。</summary>
     public static InstrumentRepository Default { get; } = new(
     [
-        new Instrument
-        {
-            InstrumentId = "rb2601",
-            ExchangeId = "SHFE",
-            ProductId = "rb",
-            VolumeMultiple = 10,
-            PriceTick = 1,
-            LongMarginRatio = 0.1,
-            ShortMarginRatio = 0.1,
-        },
-        new Instrument
-        {
-            InstrumentId = "IF2601",
-            ExchangeId = "CFFEX",
-            ProductId = "IF",
-            VolumeMultiple = 300,
-            PriceTick = 0.2,
-            LongMarginRatio = 0.12,
-            ShortMarginRatio = 0.12,
-        },
-        new Instrument
-        {
-            InstrumentId = "au2612",
-            ExchangeId = "SHFE",
-            ProductId = "au",
-            VolumeMultiple = 1000,
-            PriceTick = 0.02,
-            LongMarginRatio = 0.1,
-            ShortMarginRatio = 0.1,
-        },
-        new Instrument
-        {
-            InstrumentId = "m2605",
-            ExchangeId = "DCE",
-            ProductId = "m",
-            VolumeMultiple = 10,
-            PriceTick = 1,
-            LongMarginRatio = 0.09,
-            ShortMarginRatio = 0.09,
-        },
-        new Instrument
-        {
-            InstrumentId = "TA605",
-            ExchangeId = "CZCE",
-            ProductId = "TA",
-            VolumeMultiple = 5,
-            PriceTick = 2,
-            LongMarginRatio = 0.1,
-            ShortMarginRatio = 0.1,
-        },
+        Make("rb2601", "螺纹钢2601", "SHFE", "rb", 10, 1),
+        Make("IF2601", "沪深300 2601", "CFFEX", "IF", 300, 0.2, 0.12),
+        Make("au2612", "沪金2612", "SHFE", "au", 1000, 0.02),
+        Make("m2605", "豆粕2605", "DCE", "m", 10, 1, 0.09),
+        Make("TA605", "PTA605", "CZCE", "TA", 5, 2),
+        Make("rb2605", "螺纹钢2605", "SHFE", "rb", 10, 1),
+        Make("IF2606", "沪深300 2606", "CFFEX", "IF", 300, 0.2, 0.12),
+        Make("au2606", "沪金2606", "SHFE", "au", 1000, 0.02),
+        Make("m2609", "豆粕2609", "DCE", "m", 10, 1, 0.09),
+        Make("TA609", "PTA609", "CZCE", "TA", 5, 2),
+        Make("cu2601", "沪铜2601", "SHFE", "cu", 5, 10),
+        Make("ni2601", "沪镍2601", "SHFE", "ni", 1, 10, 0.12),
+        Make("i2601", "铁矿石2601", "DCE", "i", 100, 0.5, 0.12),
+        Make("MA605", "甲醇605", "CZCE", "MA", 10, 1),
+        Make("SR605", "白糖605", "CZCE", "SR", 10, 1),
     ]);
+
+    private static Instrument Make(
+        string id,
+        string name,
+        string exchange,
+        string product,
+        int multiple,
+        double tick,
+        double margin = 0.1) => new()
+        {
+            InstrumentId = id,
+            Name = name,
+            ExchangeId = exchange,
+            ProductId = product,
+            VolumeMultiple = multiple,
+            PriceTick = tick,
+            LongMarginRatio = margin,
+            ShortMarginRatio = margin,
+        };
 
     private static Instrument? ParseInstrument(XElement element)
     {
@@ -104,6 +88,7 @@ public sealed class InstrumentRepository
         return new Instrument
         {
             InstrumentId = id,
+            Name = element.Attribute("InstrumentName")?.Value?.Trim() ?? string.Empty,
             ExchangeId = element.Attribute("ExchangeID")?.Value?.Trim() ?? string.Empty,
             ProductId = element.Attribute("ProductID")?.Value?.Trim() ?? string.Empty,
             VolumeMultiple = ParseInt(element.Attribute("VolumeMultiple")?.Value, 1),
