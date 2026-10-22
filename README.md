@@ -64,7 +64,7 @@ rea doctor
 - 关键依赖：`bass.dll`（音频）、`cc32c290mt.dll`（C++Builder 运行时）、`thostmduserapi_se.dll` / `thosttraderapi_se.dll`（CTP 行情/交易 API）、`YYXX.dll`
 - 运行数据：`Instruments.xml`、`Users.xml`、`config.ini`、`PnL/*.csv`、`SysLog/*.txt`
 
-样本仅解压到本地 `target/`，不进入 Git；原始压缩包保留在 `.uploads/` 并由 SHA-256 清单固定。
+原始压缩包保存在 `target/source/1102.zip`（50 MB，SHA-256 `0a3267c5…22e3e2c`），随 Git 提交保存；解压内容 `target/1102/` 仍不入库。
 
 ## 工作约定
 

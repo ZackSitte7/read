@@ -1,10 +1,13 @@
-# Uploads and source archives (never commit)
+# Uploads and source archives
 .uploads/
 *.zip
 
 # Target binaries and runtime data (never commit)
 target/*
 !target/.gitkeep
+# Exception: preserve the original source archive as immutable evidence.
+!target/source/
+!target/source/*.zip
 
 # Generated evidence and captures
 artifacts/evidence/
