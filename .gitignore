@@ -34,6 +34,4 @@ obj/
 # Release packages
 release/
 
-# Local TqSdk credentials (never commit)
-config/tqsdk.local.json
-tqsdk.local.json
+# TqSdk 账号配置：按用户要求随仓库保存，便于后续直接使用

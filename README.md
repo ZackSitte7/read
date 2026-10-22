@@ -88,7 +88,7 @@ CTP 适配层当前为骨架，原生桥接层 `ReplicaCtpBridge` 尚未接入�
 
 1. 目标机安装 Python 3.10+ 与 `tqsdk`：双击 `install-tqsdk.bat`，或执行
    `python -m pip install -U tqsdk`。
-2. 账号写入 `config/tqsdk.local.json`（已被 `.gitignore` 排除，不入库）：
+2. 账号写入 `config/tqsdk.local.json`（随仓库保存，发布时自动复制到程序目录）：
 
    ```json
    { "user": "alyzc26", "password": "130100", "tradeMode": "kq" }
