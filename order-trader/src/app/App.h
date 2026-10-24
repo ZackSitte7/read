@@ -15,7 +15,6 @@
 
 namespace ot {
 
-class LoginWindow;
 class MainWindow;
 
 struct Session {
@@ -55,6 +54,7 @@ public:
 
     void pumpBridge();
     void requestLogin(const std::string& user, const std::string& password);
+    void applyCredentials(const std::string& user, const std::string& password);
     void onLoginFinished(bool ok, const std::string& message);
     void startMarketData();
 
@@ -77,6 +77,7 @@ public:
     void resetAccount();
     void requestRecenter();
     void setLadderSize(int width, int height);
+    void notifyLadderClosed(const std::string& symbol);
     void saveConfig();
     void setStatus(const std::string& text);
     void invalidateAll();
@@ -90,12 +91,9 @@ public:
     Slicer& slicer() { return slicer_; }
     ReplayEngine& replay() { return replay_; }
 
-    HWND loginHwnd() const;
     HWND mainHwnd() const;
     HINSTANCE instance() const { return inst_; }
-    void attachLogin(LoginWindow* window) { login_ = window; }
     void attachMain(MainWindow* window) { main_ = window; }
-    void detachLogin() { login_ = nullptr; }
     void detachMain() { main_ = nullptr; }
 
     void onQuote(const Quote& quote);
@@ -124,7 +122,6 @@ private:
     ReplayEngine replay_;
     BridgeClient bridge_;
     HINSTANCE inst_ = nullptr;
-    LoginWindow* login_ = nullptr;
     MainWindow* main_ = nullptr;
     bool pendingLogin_ = false;
     std::string pendingUser_;

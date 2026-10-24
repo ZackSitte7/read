@@ -11,12 +11,14 @@
 
 #include "App.h"
 #include "InfoPanel.h"
+#include "SettingsDialog.h"
 #include "core/Types.h"
 #include "ui/Gdi.h"
 #include "ui/PriceLadder.h"
 #include "ui/Theme.h"
 #include "util/Config.h"
 #include "util/Log.h"
+#include "util/Symbol.h"
 #include "util/Win.h"
 
 namespace ot {
@@ -34,7 +36,11 @@ constexpr int kHitSpeedBase = 10;
 constexpr int kHitAdd = 20;
 constexpr int kHitCancel = 21;
 constexpr int kHitReset = 22;
+constexpr int kHitOpenAll = 23;
+constexpr int kHitCloseAll = 24;
+constexpr int kHitSettings = 25;
 constexpr int kHitTabBase = 100;
+constexpr int kHitRowBase = 1000;
 
 int sc(int v) { return Th::S(v); }
 
@@ -125,20 +131,11 @@ bool MainWindow::create(HINSTANCE inst) {
     const int y = work.top + (workH - height) / 2;
 
     hwnd_ = CreateWindowExW(0, kClass, L"Order Trader v1.0 — 订单流虚拟盘",
-                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_HSCROLL, x, y, width, height,
-                            nullptr, nullptr, inst, this);
+                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, width, height, nullptr,
+                            nullptr, inst, this);
     if (!hwnd_) return false;
 
-    // 深色标题栏（Win10 1809+），失败时忽略
-    if (HMODULE dwm = LoadLibraryW(L"dwmapi.dll")) {
-        using SetAttrFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
-        auto setAttr = reinterpret_cast<SetAttrFn>(
-            reinterpret_cast<void*>(GetProcAddress(dwm, "DwmSetWindowAttribute")));
-        if (setAttr) {
-            BOOL dark = TRUE;
-            setAttr(hwnd_, 20, &dark, sizeof(dark));
-        }
-    }
+    applyDarkTitleBar(hwnd_);
     return true;
 }
 
@@ -169,10 +166,8 @@ void MainWindow::buildControls() {
     g_editProc = reinterpret_cast<WNDPROC>(
         SetWindowLongPtrW(editSymbol_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&SymbolEditProc)));
 
-    const std::wstring last = utf8ToWide(App::get().config().lastSymbol);
+    const std::wstring last = utf8ToWide(displaySymbol(App::get().config().lastSymbol));
     SetWindowTextW(editSymbol_, last.c_str());
-
-    ShowScrollBar(hwnd_, SB_HORZ, FALSE);
 }
 
 void MainWindow::layout() {
@@ -213,6 +208,7 @@ void MainWindow::layout() {
     btnCancel_ = RECT{x, by, x + sc(84), by + sc(26)};
     x += sc(92);
     btnReset_ = RECT{x, by, x + sc(84), by + sc(26)};
+    btnSettings_ = RECT{width - sc(12) - sc(76), by, width - sc(12), by + sc(26)};
 
     if (editSymbol_) {
         SetWindowPos(editSymbol_, nullptr, editRect_.left, editRect_.top,
@@ -228,81 +224,67 @@ void MainWindow::layout() {
                                  tabs_.bottom - sc(2)});
     }
 
+    layoutRows();
     inLayout_ = false;
 }
 
-void MainWindow::relayoutLadders() {
+void MainWindow::layoutRows() {
+    rows_.clear();
     if (!hwnd_) return;
-    const AppConfig& cfg = App::get().config();
-    const int pad = sc(8);
-    const int gap = sc(8);
-    const int areaW = content_.right - content_.left;
-    const int areaH = content_.bottom - content_.top;
-    if (areaW <= 0 || areaH <= 0) return;
 
-    int ladderW = cfg.ladderWidth > 0 ? cfg.ladderWidth : sc(380);
-    ladderW = std::max(sc(240), ladderW);
-    int ladderH = cfg.ladderHeight > 0 ? cfg.ladderHeight : areaH - pad * 2;
-    ladderH = std::max(sc(220), std::min(ladderH, areaH - pad * 2));
+    const int pad = sc(12);
+    contentHeader_ = RECT{content_.left + pad, content_.top + pad, content_.right - pad,
+                          content_.top + pad + sc(34)};
+    const int btnW = sc(96);
+    const int btnH = sc(24);
+    const int btnY = contentHeader_.top + (contentHeader_.bottom - contentHeader_.top - btnH) / 2;
+    btnOpenAll_ = RECT{contentHeader_.right - btnW * 2 - sc(8), btnY,
+                       contentHeader_.right - btnW - sc(8), btnY + btnH};
+    btnCloseAll_ = RECT{contentHeader_.right - btnW, btnY, contentHeader_.right, btnY + btnH};
 
-    const int count = static_cast<int>(ladders_.size());
-    const int totalW = count == 0 ? 0 : count * ladderW + (count - 1) * gap + pad * 2;
-    maxScroll_ = std::max(0, totalW - areaW);
-    scrollX_ = std::max(0, std::min(scrollX_, maxScroll_));
-
-    int x = content_.left + pad - scrollX_;
-    const int bodyTop = content_.top + pad;
-    for (auto& ladder : ladders_) {
-        // 子窗口不能超出内容区，否则会压到右侧信息面板上
-        const int left = std::max(x, static_cast<int>(content_.left));
-        const int right = std::min(x + ladderW, static_cast<int>(content_.right));
-        if (right - left < sc(120)) {
-            ladder->setVisible(false);
-        } else {
-            ladder->setVisible(true);
-            ladder->moveTo(left, bodyTop, right - left, ladderH);
-        }
-        x += ladderW + gap;
+    int y = contentHeader_.bottom + sc(6);
+    for (const auto& symbol : App::get().currentSymbols()) {
+        if (y + sc(52) > content_.bottom) break;
+        ContractRow row;
+        row.symbol = symbol;
+        row.row = RECT{content_.left + pad, y, content_.right - pad, y + sc(52)};
+        row.button = RECT{row.row.right - sc(100), y + sc(12), row.row.right - sc(14), y + sc(40)};
+        rows_.push_back(row);
+        y += sc(56);
     }
-    updateScrollBar();
-}
-
-void MainWindow::updateScrollBar() {
-    if (!hwnd_) return;
-    const int page = std::max(1, static_cast<int>(content_.right - content_.left));
-    const bool need = maxScroll_ > 0;
-    if (need != scrollVisible_) {
-        scrollVisible_ = need;
-        ShowScrollBar(hwnd_, SB_HORZ, need);
-        return;
-    }
-    if (!need) return;
-
-    SCROLLINFO si;
-    ZeroMemory(&si, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    si.nMin = 0;
-    si.nMax = maxScroll_ + page - 1;
-    si.nPage = static_cast<UINT>(page);
-    si.nPos = scrollX_;
-    SetScrollInfo(hwnd_, SB_HORZ, &si, TRUE);
 }
 
 void MainWindow::rebuildLadders() {
-    ladders_.clear();
-    const Session& session = App::get().session();
+    if (!hwnd_) return;
     const AppConfig& cfg = App::get().config();
-    if (session.page >= 0 && session.page < static_cast<int>(cfg.pages.size())) {
-        for (const auto& symbol : cfg.pages[static_cast<std::size_t>(session.page)]) {
-            auto ladder = std::make_unique<PriceLadder>(hwnd_, symbol, session.page);
-            ladder->setVisible(true);
-            ladders_.push_back(std::move(ladder));
+
+    // 页面里已删除的合约，连同它的窗口一起销毁
+    for (auto it = ladders_.begin(); it != ladders_.end();) {
+        const int page = it->second->page();
+        bool listed = false;
+        if (page >= 0 && page < static_cast<int>(cfg.pages.size())) {
+            const auto& list = cfg.pages[static_cast<std::size_t>(page)];
+            listed = std::find(list.begin(), list.end(), it->first) != list.end();
+        }
+        if (!listed) {
+            openSymbols_.erase(it->first);
+            it = ladders_.erase(it);
+        } else {
+            ++it;
         }
     }
-    ladderCount_ = static_cast<int>(ladders_.size());
-    relayoutLadders();
+
+    syncLadderVisibility();
+    layoutRows();
     refresh();
+}
+
+void MainWindow::syncLadderVisibility() {
+    const int page = App::get().session().page;
+    for (auto& item : ladders_) {
+        const bool show = item.second->page() == page && openSymbols_.count(item.first) > 0;
+        item.second->setVisible(show);
+    }
 }
 
 void MainWindow::onPageChanged() {
@@ -310,18 +292,96 @@ void MainWindow::onPageChanged() {
     rebuildLadders();
 }
 
+void MainWindow::onLadderClosed(const std::string& symbol) {
+    openSymbols_.erase(symbol);
+    refresh();
+}
+
+void MainWindow::openLadder(const std::string& symbol) {
+    if (!hwnd_ || symbol.empty()) return;
+    const Session& session = App::get().session();
+    const AppConfig& cfg = App::get().config();
+    if (session.page < 0 || session.page >= static_cast<int>(cfg.pages.size())) return;
+    const auto& list = cfg.pages[static_cast<std::size_t>(session.page)];
+    if (std::find(list.begin(), list.end(), symbol) == list.end()) return;
+
+    auto it = ladders_.find(symbol);
+    if (it == ladders_.end()) {
+        RECT anchor{};
+        GetWindowRect(hwnd_, &anchor);
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+        const int width = std::max(sc(240), cfg.ladderWidth > 0 ? cfg.ladderWidth : sc(420));
+        const int height = std::max(sc(300), cfg.ladderHeight > 0 ? cfg.ladderHeight : sc(820));
+        const int index = static_cast<int>(ladders_.size());
+        int x = anchor.left + sc(70) + index * sc(28);
+        int y = anchor.top + sc(110) + index * sc(28);
+        if (x + width > work.right) x = std::max(static_cast<int>(work.left),
+                                                 static_cast<int>(work.right) - width);
+        if (y + height > work.bottom) y = std::max(static_cast<int>(work.top),
+                                                   static_cast<int>(work.bottom) - height);
+        auto ladder = std::make_unique<PriceLadder>(hwnd_, symbol, session.page);
+        ladder->moveTo(x, y, width, height);
+        it = ladders_.emplace(symbol, std::move(ladder)).first;
+    } else {
+        it->second->setPage(session.page);
+    }
+
+    openSymbols_.insert(symbol);
+    it->second->activate();
+    it->second->refresh();
+    layoutRows();
+    refresh();
+}
+
+void MainWindow::toggleLadder(const std::string& symbol) {
+    if (openSymbols_.count(symbol) > 0) {
+        openSymbols_.erase(symbol);
+        auto it = ladders_.find(symbol);
+        if (it != ladders_.end()) it->second->setVisible(false);
+        refresh();
+    } else {
+        openLadder(symbol);
+    }
+}
+
+void MainWindow::openPageLadders(bool open) {
+    const auto symbols = App::get().currentSymbols();
+    if (open) {
+        for (const auto& symbol : symbols) openLadder(symbol);
+        return;
+    }
+    for (const auto& symbol : symbols) {
+        openSymbols_.erase(symbol);
+        auto it = ladders_.find(symbol);
+        if (it != ladders_.end()) it->second->setVisible(false);
+    }
+    refresh();
+}
+
+void MainWindow::showSettings() {
+    SettingsDialog dialog(hwnd_);
+    if (!dialog.showModal()) return;
+    App::get().applyCredentials(dialog.user(), dialog.password());
+}
+
 void MainWindow::recenterLadders() {
-    for (auto& ladder : ladders_) ladder->resetCenter();
+    for (auto& item : ladders_) item.second->resetCenter();
     App::get().setStatus("已复位所有价格梯子中心");
 }
 
 void MainWindow::applyLadderSize() {
-    relayoutLadders();
+    if (!hwnd_) return;
+    const AppConfig& cfg = App::get().config();
+    const int width = std::max(sc(240), cfg.ladderWidth > 0 ? cfg.ladderWidth : sc(420));
+    const int height = std::max(sc(300), cfg.ladderHeight > 0 ? cfg.ladderHeight : sc(820));
+    for (auto& item : ladders_) item.second->resizeTo(width, height);
     refresh();
 }
 
 int MainWindow::hitTest(POINT pt) const {
     auto inside = [&pt](const RECT& r) { return PtInRect(&r, pt) != FALSE; };
+    if (inside(btnSettings_)) return kHitSettings;
     if (inside(btnLive_)) return kHitLive;
     if (inside(btnReplay_)) return kHitReplay;
     for (int i = 0; i < 5; ++i) {
@@ -330,8 +390,13 @@ int MainWindow::hitTest(POINT pt) const {
     if (inside(btnAdd_)) return kHitAdd;
     if (inside(btnCancel_)) return kHitCancel;
     if (inside(btnReset_)) return kHitReset;
+    if (inside(btnOpenAll_)) return kHitOpenAll;
+    if (inside(btnCloseAll_)) return kHitCloseAll;
     for (std::size_t i = 0; i < tabRects_.size(); ++i) {
         if (inside(tabRects_[i])) return kHitTabBase + static_cast<int>(i);
+    }
+    for (std::size_t i = 0; i < rows_.size(); ++i) {
+        if (inside(rows_[i].row)) return kHitRowBase + static_cast<int>(i);
     }
     return 0;
 }
@@ -339,32 +404,24 @@ int MainWindow::hitTest(POINT pt) const {
 void MainWindow::addSymbolFromEdit() {
     wchar_t buf[64] = {0};
     if (editSymbol_) GetWindowTextW(editSymbol_, buf, static_cast<int>(std::size(buf)));
-    const std::string symbol = trim(wideToUtf8(buf));
-    if (symbol.empty()) {
-        App::get().setStatus("请输入合约代码，例如 SHFE.rb2701");
+    const std::string raw = trim(wideToUtf8(buf));
+    if (raw.empty()) {
+        App::get().setStatus("请输入合约代码，例如 ag2612 / ag2612c13500");
         return;
     }
-    if (!App::get().hasSymbol(symbol)) {
-        App::get().config().lastSymbol = symbol;
+    const std::string symbol = normalizeSymbol(raw);
+    if (symbol.empty()) {
+        App::get().setStatus("无法识别的合约代码：" + raw);
+        return;
     }
+    App::get().config().lastSymbol = symbol;
     App::get().addSymbol(symbol, true);
     if (editSymbol_) SendMessageW(editSymbol_, EM_SETSEL, 0, -1);
     SetFocus(hwnd_);
 }
 
-void MainWindow::removeLadder(HWND ladderHwnd) {
-    std::string symbol;
-    int page = 0;
-    bool found = false;
-    for (const auto& ladder : ladders_) {
-        if (ladder->hwnd() == ladderHwnd) {
-            symbol = ladder->symbol();
-            page = ladder->page();
-            found = true;
-            break;
-        }
-    }
-    if (!found) return;
+void MainWindow::removeSymbolFromMessage(const std::string& symbol, int page) {
+    if (symbol.empty()) return;
     App::get().removeSymbolFromPage(symbol, page);
 }
 
@@ -414,18 +471,14 @@ void MainWindow::paintTopBar(HDC dc, const RECT& rc) {
                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     const Session& session = App::get().session();
-    const AppConfig& cfg = App::get().config();
-    const std::string user = session.user.empty() ? cfg.user : session.user;
 
+    // 不显示账号名，只显示行情通道状态
     const int cy = (rc.top + rc.bottom) / 2;
     const int pillLeft = sc(244);
     RECT dot{pillLeft, cy - sc(3), pillLeft + sc(6), cy + sc(3)};
     fillSolid(dc, dot, session.bridgeReady ? Th::up : Th::down);
-    RECT userRect{pillLeft + sc(10), rc.top, pillLeft + sc(140), rc.bottom};
-    drawTextIn(dc, utf8ToWide(user), userRect, Th::text, Th::fontMono,
-               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    RECT stateRect{pillLeft + sc(140), rc.top, pillLeft + sc(228), rc.bottom};
-    drawTextIn(dc, session.bridgeReady ? L"tqsdk 已连接" : L"等待连接",
+    RECT stateRect{pillLeft + sc(10), rc.top, pillLeft + sc(150), rc.bottom};
+    drawTextIn(dc, session.bridgeReady ? L"行情通道已连接" : L"等待行情通道",
                stateRect, session.bridgeReady ? Th::textFaint : Th::warn, Th::fontSmall,
                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -462,9 +515,10 @@ void MainWindow::paintToolbar(HDC dc, const RECT& rc) {
     paintButton(dc, btnAdd_, L"添加", false, true);
     paintButton(dc, btnCancel_, L"撤销全部", false, false);
     paintButton(dc, btnReset_, L"重置账户", false, false);
+    paintButton(dc, btnSettings_, L"设置", false, false);
 
-    RECT hint{btnReset_.right + sc(16), rc.top, rc.right - sc(12), rc.bottom};
-    drawTextIn(dc, L"空格 撤单 · ESC 复位中心 · F1-F12 切页 · 拖动梯子边缘统一缩放",
+    RECT hint{btnReset_.right + sc(16), rc.top, btnSettings_.left - sc(12), rc.bottom};
+    drawTextIn(dc, L"空格 撤单 · ESC 复位中心 · F1-F12 切页 · 梯子为独立窗口",
                hint, Th::textFaint, Th::fontSmall,
                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
@@ -505,20 +559,85 @@ void MainWindow::paintTabs(HDC dc, const RECT& rc) {
     }
 }
 
-void MainWindow::paintEmptyPage(HDC dc, const RECT& rc) {
+void MainWindow::paintContent(HDC dc, const RECT& rc) {
     fillSolid(dc, rc, Th::bg);
+
+    std::wstring title = L"当前页面合约 · " + std::to_wstring(rows_.size());
+    drawTextIn(dc, title, contentHeader_, Th::textDim, Th::fontSmallBold,
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    paintButton(dc, btnOpenAll_, L"全部打开", false, false);
+    paintButton(dc, btnCloseAll_, L"全部关闭", false, false);
+    drawHLine(dc, contentHeader_.left, contentHeader_.right, contentHeader_.bottom, Th::border);
+
+    if (rows_.empty()) {
+        RECT body{rc.left, contentHeader_.bottom, rc.right, rc.bottom};
+        paintEmptyPage(dc, body);
+        return;
+    }
+
+    const SimEngine& sim = App::get().sim();
+    for (const auto& row : rows_) {
+        const bool opened = openSymbols_.count(row.symbol) > 0;
+        fillSolid(dc, row.row, opened ? Th::panelAlt : Th::panel);
+        HBRUSH frame = CreateSolidBrush(Th::border);
+        FrameRect(dc, &row.row, frame);
+        DeleteObject(frame);
+
+        RECT stripe{row.row.left, row.row.top, row.row.left + sc(3), row.row.bottom};
+        fillSolid(dc, stripe, opened ? Th::accent : Th::border);
+
+        RECT codeRect{row.row.left + sc(14), row.row.top + sc(6), row.row.left + sc(150),
+                      row.row.top + sc(28)};
+        drawTextIn(dc, utf8ToWide(displaySymbol(row.symbol)), codeRect, Th::text,
+                   Th::fontMonoBold, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        const SymbolMeta& meta = App::get().metaOf(row.symbol);
+        std::wstring name = utf8ToWide(meta.name);
+        if (name.empty()) name = L"合约信息获取中…";
+        const int nameRight = std::max(row.row.left + sc(180), row.button.left - sc(20));
+        RECT nameRect{row.row.left + sc(158), row.row.top + sc(6), nameRight,
+                      row.row.top + sc(28)};
+        drawTextIn(dc, name, nameRect, Th::textDim, Th::fontSmall,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        const Quote* quote = App::get().quoteOf(row.symbol);
+        const long long pos = sim.positionQty(row.symbol);
+        const double pnl = sim.netPnl(row.symbol);
+        const int lineY = row.row.top + sc(30);
+
+        std::wstring last = quote && quote->valid ? moneyText(quote->last) : L"--";
+        RECT lastRect{row.row.left + sc(14), lineY, row.row.left + sc(150), row.row.bottom - sc(6)};
+        drawTextIn(dc, L"最新 " + last, lastRect, Th::textFaint, Th::fontSmall,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT posRect{row.row.left + sc(160), lineY, row.row.left + sc(260), row.row.bottom - sc(6)};
+        drawTextIn(dc, L"持仓 " + std::to_wstring(pos), posRect,
+                   pos > 0 ? Th::up : (pos < 0 ? Th::down : Th::textFaint), Th::fontSmall,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT pnlRect{row.row.left + sc(270), lineY, row.button.left - sc(20),
+                     row.row.bottom - sc(6)};
+        drawTextIn(dc, L"净盈亏 " + moneyText(pnl, true), pnlRect,
+                   pnl >= 0 ? Th::up : Th::down, Th::fontSmall,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        paintButton(dc, row.button, opened ? L"关闭窗口" : L"打开窗口", opened, false);
+    }
+}
+
+void MainWindow::paintEmptyPage(HDC dc, const RECT& rc) {
     const int boxW = std::min(sc(560), static_cast<int>(rc.right - rc.left) - sc(40));
     const int left = rc.left + (rc.right - rc.left - boxW) / 2;
     const int top = rc.top + (rc.bottom - rc.top) / 2 - sc(70);
 
     RECT l1{left, top, left + boxW, top + sc(26)};
-    drawTextIn(dc, L"当前页面还没有 DOM 梯子", l1, Th::textDim, Th::fontUiBold,
+    drawTextIn(dc, L"当前页面还没有合约", l1, Th::textDim, Th::fontUiBold,
                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     RECT l2{left, top + sc(30), left + boxW, top + sc(54)};
-    drawTextIn(dc, L"在上方输入合约代码并点击「添加」，例如 SHFE.rb2701 / DCE.m2601",
+    drawTextIn(dc, L"在上方输入合约代码并点击「添加」，例如 ag2612 / ag2612c13500",
                l2, Th::textFaint, Th::fontSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     RECT l3{left, top + sc(54), left + boxW, top + sc(78)};
-    drawTextIn(dc, L"每个页面可放置多个梯子；拖动梯子右/下边缘可统一调整全部尺寸",
+    drawTextIn(dc, L"价格梯子以独立窗口打开，窗口标题即合约代码",
                l3, Th::textFaint, Th::fontSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     RECT l4{left, top + sc(78), left + boxW, top + sc(102)};
     drawTextIn(dc, L"鼠标左键挂 1 手，右键挂 2 手；数量可在梯子左侧修改",
@@ -573,11 +692,7 @@ void MainWindow::paint(HDC dc) {
     paintStatus(dc, status_);
 
     RECT content = content_;
-    if (ladderCount_ == 0) {
-        paintEmptyPage(dc, content);
-    } else {
-        fillSolid(dc, content, Th::bg);
-    }
+    paintContent(dc, content);
     drawVLine(dc, content.right, content.top, content.bottom, Th::border);
 }
 
@@ -606,7 +721,6 @@ LRESULT MainWindow::handleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_SIZE:
             layout();
-            relayoutLadders();
             return 0;
         case WM_PAINT: {
             BufferedPaint bp(hwnd_);
@@ -618,7 +732,7 @@ LRESULT MainWindow::handleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER: {
             App::get().update();
             refresh();
-            for (auto& ladder : ladders_) ladder->refresh();
+            for (auto& item : ladders_) item.second->refresh();
             return 0;
         }
         case kBridgeMsg:
@@ -627,48 +741,17 @@ LRESULT MainWindow::handleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         case kAddSymbolMsg:
             addSymbolFromEdit();
             return 0;
-        case kRemoveMsg:
-            removeLadder(reinterpret_cast<HWND>(lp));
-            return 0;
-        case WM_HSCROLL: {
-            const int page = std::max(1, static_cast<int>(content_.right - content_.left));
-            SCROLLINFO si;
-            ZeroMemory(&si, sizeof(si));
-            si.cbSize = sizeof(si);
-            si.fMask = SIF_ALL;
-            GetScrollInfo(hwnd_, SB_HORZ, &si);
-            switch (LOWORD(wp)) {
-                case SB_LINELEFT:
-                    scrollX_ -= sc(60);
-                    break;
-                case SB_LINERIGHT:
-                    scrollX_ += sc(60);
-                    break;
-                case SB_PAGELEFT:
-                    scrollX_ -= page;
-                    break;
-                case SB_PAGERIGHT:
-                    scrollX_ += page;
-                    break;
-                case SB_THUMBTRACK:
-                case SB_THUMBPOSITION:
-                    scrollX_ = si.nTrackPos;
-                    break;
-                default:
-                    return 0;
+        case kRemoveMsg: {
+            auto* payload = reinterpret_cast<std::string*>(lp);
+            if (!payload) return 0;
+            const std::size_t split = payload->find('\n');
+            if (split == std::string::npos) {
+                removeSymbolFromMessage(*payload, -1);
+            } else {
+                removeSymbolFromMessage(payload->substr(0, split),
+                                        std::atoi(payload->c_str() + split + 1));
             }
-            relayoutLadders();
-            return 0;
-        }
-        case WM_MOUSEWHEEL: {
-            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            ScreenToClient(hwnd_, &pt);
-            if (maxScroll_ > 0 && PtInRect(&content_, pt)) {
-                const int delta = GET_WHEEL_DELTA_WPARAM(wp);
-                scrollX_ += delta > 0 ? -sc(60) : sc(60);
-                relayoutLadders();
-                return 0;
-            }
+            delete payload;
             return 0;
         }
         case WM_KEYDOWN: {
@@ -704,6 +787,15 @@ LRESULT MainWindow::handleMessage(UINT msg, WPARAM wp, LPARAM lp) {
                                 L"重置账户", MB_ICONQUESTION | MB_YESNO) == IDYES) {
                     App::get().resetAccount();
                 }
+            } else if (hit == kHitSettings) {
+                showSettings();
+            } else if (hit == kHitOpenAll) {
+                openPageLadders(true);
+            } else if (hit == kHitCloseAll) {
+                openPageLadders(false);
+            } else if (hit >= kHitRowBase) {
+                const std::size_t index = static_cast<std::size_t>(hit - kHitRowBase);
+                if (index < rows_.size()) toggleLadder(rows_[index].symbol);
             } else if (hit >= kHitTabBase) {
                 App::get().setPage(hit - kHitTabBase);
             }

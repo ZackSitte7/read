@@ -11,7 +11,7 @@ class PriceLadder {
 public:
     static void registerClass(HINSTANCE inst);
 
-    PriceLadder(HWND parent, const std::string& symbol, int page);
+    PriceLadder(HWND owner, const std::string& symbol, int page);
     ~PriceLadder();
 
     HWND hwnd() const { return hwnd_; }
@@ -19,8 +19,10 @@ public:
     int page() const { return page_; }
     void setPage(int page) { page_ = page; }
     void setVisible(bool visible);
+    void activate();
     bool isVisible() const;
     void moveTo(int x, int y, int w, int h);
+    void resizeTo(int w, int h);
     void resetCenter();
     void refresh();
     void requestRemove();
@@ -29,7 +31,7 @@ private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     LRESULT handleMessage(UINT msg, WPARAM wp, LPARAM lp);
 
-    void create(HWND parent);
+    void create();
     void destroyChildren();
     void layoutEdits();
     void paint(HDC dc);
@@ -56,7 +58,7 @@ private:
     void syncAnchor();
 
     HWND hwnd_ = nullptr;
-    HWND parent_ = nullptr;
+    HWND owner_ = nullptr;
     HWND editLeft_ = nullptr;
     HWND editRight_ = nullptr;
     HFONT editFont_ = nullptr;

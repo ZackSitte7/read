@@ -45,4 +45,18 @@ int clearMarkOfTheWeb(const std::wstring& root) {
     return removed;
 }
 
+void applyDarkTitleBar(HWND hwnd) {
+    if (!hwnd) return;
+    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+    if (!dwm) return;
+    using SetAttrFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+    auto setAttr = reinterpret_cast<SetAttrFn>(
+        reinterpret_cast<void*>(GetProcAddress(dwm, "DwmSetWindowAttribute")));
+    if (setAttr) {
+        BOOL dark = TRUE;
+        setAttr(hwnd, 20, &dark, sizeof(dark));
+    }
+    FreeLibrary(dwm);
+}
+
 }  // namespace ot

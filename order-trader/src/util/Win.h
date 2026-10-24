@@ -41,6 +41,9 @@ inline std::string wideToUtf8(const std::wstring& text) {
 
 std::wstring exeDir();
 
+/// Win10 1809+ 深色标题栏；系统不支持时静默忽略。
+void applyDarkTitleBar(HWND hwnd);
+
 /// 删除目录下所有文件的“来自 Internet”标记（Zone.Identifier），
 /// 避免 Windows 对解压出来的每个 dll/pyc 做联网信誉检查导致首次加载极慢。
 int clearMarkOfTheWeb(const std::wstring& root);

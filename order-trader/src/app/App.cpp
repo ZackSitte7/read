@@ -4,8 +4,8 @@
 #include <cstdio>
 
 #include "MainWindow.h"
-#include "LoginWindow.h"
 #include "util/Log.h"
+#include "util/Symbol.h"
 #include "util/Win.h"
 
 namespace ot {
@@ -21,47 +21,6 @@ std::string pruneUtf8(const std::string& text, std::size_t maxBytes) {
     while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80) out.pop_back();
     return out + "...";
 }
-
-/// 品种 -> 交易所，用于把 rb2701 补全为 SHFE.rb2701
-const std::vector<std::pair<std::string, std::string>>& exchangeProducts() {
-    static const std::vector<std::pair<std::string, std::string>> table = {
-        {"SHFE", "rb hc cu al zn pb ni sn au ag ss sp fu bu ru nr wr"},
-        {"DCE", "a b c cs i j jm jd l m p pp v y eg eb pg lh bb fb rr"},
-        {"CZCE", "MA TA SR CF CY FG RM OI ZC SM SF AP CJ UR SA PF PK RS RI WH JR LR PM"},
-        {"CFFEX", "IF IH IC IM T TF TS TL"},
-        {"INE", "sc lu bc nr"},
-        {"GFEX", "si lc ps"},
-    };
-    return table;
-}
-
-std::string normalizeSymbol(const std::string& raw) {
-    std::string symbol;
-    for (char c : raw) {
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
-        symbol.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
-    }
-    if (symbol.empty() || symbol.find('.') != std::string::npos) return symbol;
-
-    std::string product;
-    for (char c : symbol) {
-        if (c >= 'A' && c <= 'Z') product.push_back(c);
-    }
-    for (const auto& pair : exchangeProducts()) {
-        std::string list = pair.second;
-        std::string token;
-        for (std::size_t i = 0; i <= list.size(); ++i) {
-            if (i == list.size() || list[i] == ' ') {
-                if (token == product) return pair.first + "." + symbol;
-                token.clear();
-            } else {
-                token.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(list[i]))));
-            }
-        }
-    }
-    return symbol;
-}
-
 
 std::string cmdLogin(const std::string& user, const std::string& password) {
     return jsonObject({
@@ -165,11 +124,21 @@ bool App::init(HINSTANCE inst) {
 }
 
 int App::run() {
-    login_ = new LoginWindow();
-    if (!login_->create(inst_)) {
-        MessageBoxW(nullptr, L"无法创建登录窗口。", L"Order Trader", MB_ICONERROR);
+    main_ = new MainWindow();
+    if (!main_->create(inst_)) {
+        MessageBoxW(nullptr, L"无法创建主窗口。", L"Order Trader", MB_ICONERROR);
         return 1;
     }
+    main_->show();
+    applog::write("主窗口已创建");
+
+    if (config_.user.empty() || config_.password.empty()) {
+        // 首次运行或配置缺失：打开设置，让用户补齐内置之外的账号
+        main_->showSettings();
+    } else {
+        requestLogin(config_.user, config_.password);
+    }
+
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
@@ -186,7 +155,6 @@ void App::shutdown() {
     applog::write("Order Trader 退出");
 }
 
-HWND App::loginHwnd() const { return login_ ? login_->hwnd() : nullptr; }
 HWND App::mainHwnd() const { return main_ ? main_->hwnd() : nullptr; }
 
 std::wstring App::bridgeScript() const { return exeDir() + L"\\bridge\\tqsdk_bridge.py"; }
@@ -231,8 +199,7 @@ void App::requestLogin(const std::string& user, const std::string& password) {
                             "或将便携版 Python 放到程序目录的 python\\ 下。");
             return;
         }
-        bridge_.setNotifyWindow(loginHwnd());
-        if (login_) login_->showProgress("正在启动行情桥接...");
+        bridge_.setNotifyWindow(mainHwnd());
         std::string error;
         if (!bridge_.start(python, script, exeDir(), &error)) {
             onLoginFinished(false, "启动行情桥接失败：" + error);
@@ -252,6 +219,28 @@ void App::requestLogin(const std::string& user, const std::string& password) {
     setStatus("正在验证 tqsdk 账户...");
 }
 
+void App::applyCredentials(const std::string& user, const std::string& password) {
+    config_.user = user;
+    config_.password = password;
+    config_.rememberPassword = true;
+    saveConfig();
+
+    session_.loggedIn = false;
+    session_.apiReady = false;
+    session_.apiFailed = false;
+    session_.bridgeReady = false;
+    session_.user.clear();
+    pendingLogin_ = false;
+    pendingUser_.clear();
+    envHintSec_ = -1;
+    lastBridgeLog_.clear();
+    bridge_.stop();
+    bridgeStartedAt_ = 0;
+
+    applog::write("账号信息已更新，重新连接行情");
+    requestLogin(user, password);
+}
+
 void App::onLoginFinished(bool ok, const std::string& message) {
     pendingLogin_ = false;
     if (!ok) {
@@ -262,7 +251,14 @@ void App::onLoginFinished(bool ok, const std::string& message) {
         bridgeStartedAt_ = 0;
         setStatus("登录失败");
         applog::write("login failed: " + message);
-        if (login_) login_->showError(message);
+        if (main_) {
+            const std::wstring detail = utf8ToWide(message);
+            MessageBoxW(mainHwnd(),
+                        (L"账号验证失败：\n" + detail +
+                         L"\n\n请在主界面「设置」中检查 tqsdk 账号与密码，或关闭 VPN/代理后重试。")
+                            .c_str(),
+                        L"Order Trader", MB_ICONWARNING);
+        }
         return;
     }
 
@@ -282,9 +278,8 @@ void App::onLoginFinished(bool ok, const std::string& message) {
             PostQuitMessage(1);
             return;
         }
+        main_->show();
     }
-    main_->show();
-    if (login_) login_->closeSelf();
     if (message.empty() || message == "ok") {
         setStatus("账号验证通过，正在加载行情环境...");
     } else {
@@ -311,7 +306,6 @@ void App::handleBridge(const BridgeMessage& msg) {
         session_.bridgeReady = true;
         bridgeStartedAt_ = 0;
         applog::write("bridge ready");
-        if (pendingLogin_ && login_) login_->showProgress("行情桥接已就绪，正在登录 tqsdk...");
         return;
     }
     if (msg.type == "login_result") {
@@ -401,13 +395,11 @@ void App::handleBridge(const BridgeMessage& msg) {
         if (envReady) {
             const std::string version = data.find("version") ? data.find("version")->str() : "";
             applog::write("bridge env ready: " + version);
-            if (pendingLogin_ && login_) login_->showProgress("tqsdk 运行环境已就绪，正在登录...");
         } else {
             const std::string text =
                 data.find("message") ? data.find("message")->str() : "tqsdk 运行环境不可用";
             applog::write("bridge env failed: " + text);
             if (pendingLogin_) onLoginFinished(false, text);
-            else if (login_) login_->showError(text);
         }
         return;
     }
@@ -444,7 +436,6 @@ void App::handleBridge(const BridgeMessage& msg) {
             if (pendingLogin_) {
                 // 桥接仍有输出，说明 tqsdk 正在连接/下载数据，不计入超时
                 loginSentAt_ = nowMs();
-                if (login_) login_->showProgress(text);
             }
         }
         return;
@@ -622,8 +613,9 @@ void App::addSymbol(const std::string& rawSymbol, bool toCurrentPage) {
     }
     if (main_) {
         main_->onPageChanged();
+        if (toCurrentPage) main_->openLadder(symbol);
     }
-    setStatus("已添加合约 " + symbol);
+    setStatus("已添加合约 " + displaySymbol(symbol));
     invalidateAll();
 }
 
@@ -693,6 +685,11 @@ void App::resetAccount() {
 
 void App::requestRecenter() {
     if (main_) main_->recenterLadders();
+}
+
+void App::notifyLadderClosed(const std::string& symbol) {
+    if (main_) main_->onLadderClosed(symbol);
+    setStatus("已关闭价格梯子 " + displaySymbol(symbol));
 }
 
 void App::setLadderSize(int width, int height) {

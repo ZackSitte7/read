@@ -11,6 +11,8 @@
 #include "app/App.h"
 #include "ui/Gdi.h"
 #include "ui/Theme.h"
+#include "util/Config.h"
+#include "util/Symbol.h"
 
 namespace ot {
 
@@ -70,9 +72,9 @@ void PriceLadder::registerClass(HINSTANCE inst) {
     RegisterClassExW(&wc);
 }
 
-PriceLadder::PriceLadder(HWND parent, const std::string& symbol, int page)
-    : parent_(parent), symbol_(symbol), page_(page) {
-    create(parent);
+PriceLadder::PriceLadder(HWND owner, const std::string& symbol, int page)
+    : owner_(owner), symbol_(symbol), page_(page) {
+    create();
 }
 
 PriceLadder::~PriceLadder() {
@@ -84,9 +86,21 @@ PriceLadder::~PriceLadder() {
     }
 }
 
-void PriceLadder::create(HWND parent) {
-    hwnd_ = CreateWindowExW(0, kClass, L"", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0,
-                            sc(360), sc(700), parent, nullptr, GetModuleHandleW(nullptr), this);
+void PriceLadder::create() {
+    const AppConfig& cfg = App::get().config();
+    const int width = cfg.ladderWidth > 0 ? cfg.ladderWidth : sc(420);
+    const int height = cfg.ladderHeight > 0 ? cfg.ladderHeight : sc(820);
+
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int x = work.left + sc(80);
+    const int y = work.top + sc(80);
+
+    const std::wstring title = utf8ToWide(displaySymbol(symbol_));
+    hwnd_ = CreateWindowExW(WS_EX_APPWINDOW, kClass, title.c_str(),
+                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, width, height, nullptr,
+                            nullptr, GetModuleHandleW(nullptr), this);
+    applyDarkTitleBar(hwnd_);
 }
 
 void PriceLadder::destroyChildren() {
@@ -113,6 +127,12 @@ void PriceLadder::setVisible(bool visible) {
     ShowWindow(hwnd_, visible ? SW_SHOWNA : SW_HIDE);
 }
 
+void PriceLadder::activate() {
+    if (!hwnd_) return;
+    ShowWindow(hwnd_, SW_SHOWNORMAL);
+    SetForegroundWindow(hwnd_);
+}
+
 bool PriceLadder::isVisible() const {
     return hwnd_ && IsWindowVisible(hwnd_) != FALSE;
 }
@@ -123,12 +143,23 @@ void PriceLadder::moveTo(int x, int y, int w, int h) {
     layoutEdits();
 }
 
+void PriceLadder::resizeTo(int w, int h) {
+    if (!hwnd_) return;
+    RECT rc;
+    GetWindowRect(hwnd_, &rc);
+    SetWindowPos(hwnd_, nullptr, rc.left, rc.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    layoutEdits();
+}
+
 void PriceLadder::refresh() {
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PriceLadder::requestRemove() {
-    if (parent_ && hwnd_) PostMessageW(parent_, kRemoveMsg, 0, reinterpret_cast<LPARAM>(hwnd_));
+    if (!owner_) return;
+    std::string* payload = new std::string(symbol_ + "\n" + std::to_string(page_));
+    ShowWindow(hwnd_, SW_HIDE);
+    PostMessageW(owner_, kRemoveMsg, 0, reinterpret_cast<LPARAM>(payload));
 }
 
 void PriceLadder::resetCenter() {
@@ -366,7 +397,7 @@ void PriceLadder::paintHeader(HDC dc, const RECT& client, int headerH, int strip
     const SymbolMeta& meta = App::get().metaOf(symbol_);
     const Quote* quote = App::get().quoteOf(symbol_);
 
-    std::wstring title = utf8ToWide(symbol_);
+    std::wstring title = utf8ToWide(displaySymbol(symbol_));
     RECT tr{sc(8), sc(4), client.right - sc(76), sc(28)};
     drawTextIn(dc, title, tr, Th::text, Th::fontMonoBold, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -643,7 +674,12 @@ LRESULT PriceLadder::handleMessage(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_KEYDOWN:
-            SendMessageW(parent_, WM_KEYDOWN, wp, lp);
+            if (owner_) PostMessageW(owner_, WM_KEYDOWN, wp, lp);
+            return 0;
+        case WM_CLOSE:
+            // 关窗只隐藏，合约仍留在当前页面列表中，可从主界面重新打开
+            ShowWindow(hwnd_, SW_HIDE);
+            App::get().notifyLadderClosed(symbol_);
             return 0;
         case WM_NCDESTROY: {
             HWND closing = hwnd_;

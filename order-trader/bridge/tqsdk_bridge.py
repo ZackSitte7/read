@@ -235,24 +235,62 @@ def to_ms(value) -> int:
 
 
 _EXCHANGE_PRODUCTS = {
-    "SHFE": "rb hc cu al zn pb ni sn au ag ss sp fu bu ru nr wr".split(),
-    "DCE": "a b c cs i j jm jd l m p pp v y eg eb pg lh bb fb rr".split(),
-    "CZCE": "MA TA SR CF CY FG RM OI ZC SM SF AP CJ UR SA PF PK RS RI WH JR LR PM".split(),
-    "CFFEX": "IF IH IC IM T TF TS TL".split(),
-    "INE": "sc lu bc nr".split(),
+    "SHFE": "rb hc cu al zn pb ni sn au ag ss sp fu bu ru wr br".split(),
+    "DCE": "a b c cs i j jm jd l m p pp v y eg eb pg lh bb fb rr lg".split(),
+    "CZCE": "MA TA SR CF CY FG RM OI ZC SM SF AP CJ UR SA PF PK RS RI WH JR LR PM PX SH PR".split(),
+    "CFFEX": "IF IH IC IM IO HO MO T TF TS TL".split(),
+    "INE": "sc lu bc nr ec".split(),
     "GFEX": "si lc ps".split(),
 }
 
+_DASH_OPTION_EXCHANGES = {"DCE", "CFFEX"}
+
 
 def infer_symbol(instrument_id: str) -> str:
-    """为缺少交易所前缀的合约代码补齐前缀，例如 rb2701 -> SHFE.rb2701。"""
-    if "." in instrument_id:
-        return instrument_id
-    product = "".join(ch for ch in instrument_id if ch.isalpha()).upper()
+    """为缺少交易所前缀的合约代码补齐前缀，例如 rb2701 -> SHFE.rb2701、
+    ag2612c13500 -> SHFE.ag2612C13500、m2601c2500 -> DCE.m2601-C-2500。"""
+    text = instrument_id.strip()
+    if not text or "." in text:
+        return text
+
+    idx = 0
+    while idx < len(text) and text[idx].isalpha():
+        idx += 1
+    product = text[:idx]
+    if not product:
+        return text
+
+    rest = text[idx:].replace("-", "")
+    month = ""
+    for ch in rest:
+        if not ch.isdigit():
+            break
+        month += ch
+    if not month:
+        return text
+
+    tail = rest[len(month):]
+    option = ""
+    strike = ""
+    if tail and tail[0].upper() in ("C", "P"):
+        option = tail[0].upper()
+        strike = "".join(ch for ch in tail[1:] if ch.isdigit() or ch == ".")
+    if option and not strike:
+        option = ""
+
+    wanted = product.upper()
     for exchange, products in _EXCHANGE_PRODUCTS.items():
-        if product in (p.upper() for p in products):
-            return f"{exchange}.{instrument_id}"
-    return instrument_id
+        for item in products:
+            if item.upper() != wanted:
+                continue
+            suffix = ""
+            if option:
+                if exchange in _DASH_OPTION_EXCHANGES:
+                    suffix = f"-{option}-{strike}"
+                else:
+                    suffix = f"{option}{strike}"
+            return f"{exchange}.{item}{month}{suffix}"
+    return text
 
 
 def side_of(last: float, ask1: float, bid1: float, prev_last: float) -> int:
