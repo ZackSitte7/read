@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import queue
 import sys
 import threading
@@ -42,6 +43,79 @@ import traceback
 from datetime import datetime
 
 _OUT_LOCK = threading.Lock()
+
+# tqsdk 的 HTTP 请求会继承系统代理。直连与走代理哪种可用因机器而异，
+# 登录前各用几秒探测一次，选通的那条路走，避免在不通的路上反复等 30 秒超时。
+_TQ_HOSTS = ("api.shinnytech.com,openmd.shinnytech.com,files.shinnytech.com,"
+             "shinny-tqsdk.oss-cn-shanghai.aliyuncs.com,auth.shinnytech.com")
+_ORIG_NO_PROXY = (os.environ.get("no_proxy"), os.environ.get("NO_PROXY"))
+_PROBE_URL = "https://api.shinnytech.com/ns"
+
+
+def probe_direct() -> bool:
+    """探测天勤域名能否直连；直连不通再试系统代理，两者都记入日志。"""
+    try:
+        import requests
+    except Exception:
+        return True
+
+    direct = requests.Session()
+    direct.trust_env = False
+    direct.proxies = {"http": None, "https": None}
+    try:
+        direct.get(_PROBE_URL, params={"stock": "true", "backtest": "false"}, timeout=5)
+        log("网络检测：直连天勤服务器可用")
+        return True
+    except Exception as exc:
+        log(f"网络检测：直连失败（{type(exc).__name__}）")
+    finally:
+        direct.close()
+
+    try:
+        requests.get(_PROBE_URL, params={"stock": "true", "backtest": "false"}, timeout=6)
+        log("网络检测：改走系统代理可用")
+        return False
+    except Exception as exc:
+        log(f"网络检测：系统代理也不可用（{type(exc).__name__}），按默认配置继续尝试")
+        return False
+
+
+def apply_proxy_mode(direct: bool) -> None:
+    for key, original in zip(("no_proxy", "NO_PROXY"), _ORIG_NO_PROXY):
+        if direct:
+            os.environ[key] = ((original or "") + "," + _TQ_HOSTS).lstrip(",")
+        elif original is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = original
+
+
+# 当前登录阶段，供心跳日志带上，界面可直接显示卡在哪一步。
+_STAGE = "启动"
+
+# tqsdk 的导入（numpy/pandas/scipy）很重，进程一启动就在后台预热，
+# 用户输密码的时间足够完成，点击登录时只需连接行情服务器。
+_TQSDK = None
+_TQSDK_ERROR = None
+_TQSDK_READY = threading.Event()
+
+
+def prewarm_tqsdk() -> None:
+    global _TQSDK, _TQSDK_ERROR
+    started = time.time()
+    try:
+        import tqsdk  # noqa: F401  （延迟导入，启动阶段预热）
+        _TQSDK = tqsdk
+        log(f"tqsdk 运行环境已就绪，用时 {time.time() - started:.1f}s")
+        emit({"type": "env", "ready": True, "version": getattr(tqsdk, "__version__", ""),
+              "seconds": round(time.time() - started, 2)})
+    except Exception as exc:
+        _TQSDK_ERROR = exc
+        log(f"tqsdk 运行环境加载失败：{exc}\n{traceback.format_exc()}")
+        emit({"type": "env", "ready": False,
+              "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
+    finally:
+        _TQSDK_READY.set()
 
 # Windows 管道默认使用本地代码页，这里统一成 UTF-8，避免中文乱码。
 for _stream in (sys.stdout, sys.stderr):
@@ -184,6 +258,7 @@ class Bridge:
             self.api = None
 
     def cmd_login(self, request: dict) -> None:
+        global _STAGE
         user = str(request.get("user") or "")
         password = str(request.get("password") or "")
         if not user or not password:
@@ -192,28 +267,38 @@ class Bridge:
 
         # 加载 tqsdk（numpy/pandas/scipy）本身就可能耗时十几秒，先起心跳再导入
         stop = threading.Event()
+        started = time.time()
 
         def heartbeat() -> None:
             waited = 0
             while not stop.wait(5.0):
                 waited += 5
-                log(f"正在登录 tqsdk，已等待 {waited} 秒")
+                log(f"正在登录 tqsdk（{_STAGE}），已等待 {waited} 秒")
+                # 兜底：无论卡在导入还是网络，都不让界面无限等下去
+                if waited >= 150:
+                    log(f"登录超时，当前阶段：{_STAGE}")
+                    emit({"type": "login_result", "ok": False,
+                          "message": f"连接 tqsdk 超时（{_STAGE}），请检查网络后重试"})
+                    os._exit(3)
 
         threading.Thread(target=heartbeat, daemon=True).start()
         try:
-            log("正在加载 tqsdk 运行环境（首次运行可能需要几十秒）")
-            try:
-                from tqsdk import TqApi, TqAuth
-            except Exception as exc:
-                # 内嵌运行环境缺少依赖时必须立刻回报，否则 C++ 侧只能看到超时
-                log(traceback.format_exc())
-                emit({"type": "login_result", "ok": False,
-                      "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
+            _STAGE = "加载 tqsdk 运行环境"
+            log("正在加载 tqsdk 运行环境")
+            _TQSDK_READY.wait()
+            if _TQSDK is None:
+                message = f"加载 tqsdk 失败：{_TQSDK_ERROR or '未知错误'}"
+                emit({"type": "login_result", "ok": False, "message": message})
                 return
+            TqApi = _TQSDK.TqApi
+            TqAuth = _TQSDK.TqAuth
 
+            _STAGE = "检测网络"
+            apply_proxy_mode(probe_direct())
+
+            _STAGE = "连接行情服务器"
             log(f"Python {sys.version.split()[0]}，tqsdk 运行环境就绪，正在连接行情服务器")
             self.close_api()
-            started = time.time()
             try:
                 self.api = TqApi(auth=TqAuth(user, password), web_gui=False)
             except Exception as exc:
@@ -227,6 +312,7 @@ class Bridge:
             log(f"tqsdk 登录成功，用时 {time.time() - started:.2f}s")
             emit({"type": "login_result", "ok": True, "account": user})
         finally:
+            _STAGE = "就绪"
             stop.set()
 
     # -------------------------------------------------------------- 合约信息
@@ -476,6 +562,8 @@ def reader_loop(lines: "queue.Queue[str]") -> None:
 
 def main() -> int:
     emit({"type": "ready", "source": "tqsdk"})
+    # 后台预热 tqsdk，用户输密码的时间和它并行
+    threading.Thread(target=prewarm_tqsdk, daemon=True).start()
 
     lines: "queue.Queue[str]" = queue.Queue()
     threading.Thread(target=reader_loop, args=(lines,), daemon=True).start()

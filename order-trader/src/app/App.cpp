@@ -14,6 +14,14 @@ namespace {
 
 constexpr double kSpeeds[] = {0.5, 1.0, 2.0, 5.0, 10.0};
 
+/// 按字节截断但不切断 UTF-8 字符，用于把桥接长日志压进单行提示
+std::string pruneUtf8(const std::string& text, std::size_t maxBytes) {
+    if (text.size() <= maxBytes) return text;
+    std::string out = text.substr(0, maxBytes);
+    while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80) out.pop_back();
+    return out + "...";
+}
+
 /// 品种 -> 交易所，用于把 rb2701 补全为 SHFE.rb2701
 const std::vector<std::pair<std::string, std::string>>& exchangeProducts() {
     static const std::vector<std::pair<std::string, std::string>> table = {
@@ -243,6 +251,10 @@ void App::onLoginFinished(bool ok, const std::string& message) {
     pendingLogin_ = false;
     if (!ok) {
         session_.loggedIn = false;
+        // 失败后必须结束桥接进程：TqApi 可能卡在 close/重连里，留着它会让重试也无法响应
+        bridge_.stop();
+        session_.bridgeReady = false;
+        bridgeStartedAt_ = 0;
         setStatus("登录失败");
         applog::write("login failed: " + message);
         if (login_) login_->showError(message);
@@ -365,10 +377,26 @@ void App::handleBridge(const BridgeMessage& msg) {
         onReplayTicks(symbol, std::move(ticks));
         return;
     }
+    if (msg.type == "env") {
+        const bool envReady = data.find("ready") && data.find("ready")->asBool();
+        if (envReady) {
+            const std::string version = data.find("version") ? data.find("version")->str() : "";
+            applog::write("bridge env ready: " + version);
+            if (pendingLogin_ && login_) login_->showProgress("tqsdk 运行环境已就绪，正在登录...");
+        } else {
+            const std::string text =
+                data.find("message") ? data.find("message")->str() : "tqsdk 运行环境不可用";
+            applog::write("bridge env failed: " + text);
+            if (pendingLogin_) onLoginFinished(false, text);
+            else if (login_) login_->showError(text);
+        }
+        return;
+    }
     if (msg.type == "log" || msg.type == "textlog") {
         std::string text = data.find("message") ? data.find("message")->str() : data.str();
         if (!text.empty()) {
             applog::write("[bridge] " + text);
+            lastBridgeLog_ = text;
             setStatus(text);
             if (pendingLogin_) {
                 // 桥接仍有输出，说明 tqsdk 正在连接/下载数据，不计入超时
@@ -653,9 +681,11 @@ void App::update() {
         }
         return;
     }
-    // 连接进度日志会不断刷新 loginSentAt_；这里再加 240 秒硬上限，防止心跳把超时无限推迟
-    if (pendingLogin_ && (now - loginSentAt_ > 150000 || now - loginStartedAt_ > 240000)) {
-        onLoginFinished(false, "登录超时：tqsdk 长时间无响应，请检查网络后重试（详见 logs 目录日志）");
+    // 桥接每 5 秒有心跳，沉默 90 秒说明进程已卡死；另加 200 秒总上限兜底
+    if (pendingLogin_ && (now - loginSentAt_ > 90000 || now - loginStartedAt_ > 200000)) {
+        std::string detail = "登录超时：tqsdk 长时间无响应";
+        if (!lastBridgeLog_.empty()) detail += "（最后阶段：" + pruneUtf8(lastBridgeLog_, 70) + "）";
+        onLoginFinished(false, detail);
         return;
     }
     if (session_.replayLoading && now - session_.replayLoadStart > 45000) {

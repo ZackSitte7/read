@@ -32,7 +32,8 @@ all: $(TARGET)
 pycache:
 	@if command -v $(PY311) >/dev/null 2>&1 && [ -d "$(RUNTIME)/Lib/site-packages" ]; then \
 		echo "预编译 Python 字节码（加速首次启动）..."; \
-		$(PY311) -m compileall -q -j 8 --invalidation-mode unchecked-hash "$(RUNTIME)/Lib/site-packages"; \
+		$(PY311) -m compileall -q -j 8 --invalidation-mode unchecked-hash "$(RUNTIME)/Lib/site-packages" || \
+		echo "跳过字节码预编译：$(PY311) 不可用"; \
 	fi
 
 runtime:
