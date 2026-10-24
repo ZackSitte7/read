@@ -16,13 +16,13 @@ struct ExchangeRule {
 };
 
 const ExchangeRule kRules[] = {
-    {"SHFE", "rb hc cu al zn pb ni sn au ag ss sp fu bu ru wr br", false, false},
-    {"DCE", "a b c cs i j jm jd l m p pp v y eg eb pg lh bb fb rr lg", false, true},
-    {"CZCE", "MA TA SR CF CY FG RM OI ZC SM SF AP CJ UR SA PF PK RS RI WH JR LR PM PX SH PR",
+    {"SHFE", "rb hc cu al zn pb ni sn au ag ss sp fu bu ru wr br ao ad op", false, false},
+    {"DCE", "a b c cs i j jm jd l m p pp v y eg eb pg lh bb fb rr lg bz", false, true},
+    {"CZCE", "MA TA SR CF CY FG RM OI ZC SM SF AP CJ UR SA PF PK RS RI WH JR LR PM PX SH PR PL",
      true, false},
     {"CFFEX", "IF IH IC IM IO HO MO T TF TS TL", true, true},
     {"INE", "sc lu bc nr ec", false, false},
-    {"GFEX", "si lc ps", false, false},
+    {"GFEX", "si lc ps pd pt", false, true},
 };
 
 std::string upperText(const std::string& text) {

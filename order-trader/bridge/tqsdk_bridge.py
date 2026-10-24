@@ -5,6 +5,16 @@
 C++ 主程序通过 stdin/stdout 的 JSON Lines 与本进程通信。本进程只负责行情，
 虚拟撮合完全在 C++ 侧完成。
 
+连接层与 pullstack_meter 的天勤实时行情源保持同一套做法：
+  · TqApi(auth=TqAuth(user, pwd), disable_print=True)：账号认证与行情服务器连接
+    全部交给 tqsdk 自己完成，不再另外拼一套 HTTP 校验 / 代理探测
+  · TqApi 有线程归属，构造与 wait_update 都在同一个“行情线程”里完成
+  · 主循环 wait_update(deadline=now+0.5)：非交易时段服务器没有行情帧，
+    不带 deadline 会永久阻塞，订阅/退出都推进不了
+  · tick 变化判定：逐字段与上一笔快照比较（价/量/持仓/时间 + 五档全量），
+    比 is_changing 单字段更稳，不会漏掉 2~5 档的堆单/撤单
+  · 断线指数退避重连（1s -> 30s）
+
   C++ -> Python
     {"cmd":"login","user":"alyzc26","password":"130100"}
     {"cmd":"symbol","symbol":"SHFE.rb2701"}
@@ -15,7 +25,10 @@ C++ 主程序通过 stdin/stdout 的 JSON Lines 与本进程通信。本进程�
 
   Python -> C++
     {"type":"ready","source":"tqsdk"}
+    {"type":"env","ready":true,"version":"..."}
     {"type":"login_result","ok":true,"account":"alyzc26"}
+    {"type":"api_ready","account":"alyzc26"}
+    {"type":"api_error","message":"..."}
     {"type":"symbol_info","symbol":"SHFE.rb2701",...}
     {"type":"quote","symbol":"SHFE.rb2701",...}
     {"type":"tick","symbol":"SHFE.rb2701","row":[...]}
@@ -34,7 +47,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import queue
 import sys
 import threading
@@ -44,133 +56,11 @@ from datetime import datetime
 
 _OUT_LOCK = threading.Lock()
 
-# requests 在进程启动阶段就导入：登录线程不能再去抢导入锁，
-# 否则行情环境的 numpy 正在导入时会把账号校验堵在 import 上。
-try:
-    import requests
-except Exception as _requests_exc:  # noqa: BLE001
-    requests = None
-    _REQUESTS_ERROR = _requests_exc
-
-# tqsdk 的 HTTP 请求会继承系统代理。直连与走代理哪种可用因机器而异，
-# 登录前各用几秒探测一次，选通的那条路走，避免在不通的路上反复等 30 秒超时。
-_TQ_HOSTS = ("api.shinnytech.com,openmd.shinnytech.com,files.shinnytech.com,"
-             "shinny-tqsdk.oss-cn-shanghai.aliyuncs.com,auth.shinnytech.com")
-_ORIG_NO_PROXY = (os.environ.get("no_proxy"), os.environ.get("NO_PROXY"))
-
-
-def apply_proxy_mode(direct: bool) -> None:
-    """让天勤域名直连（direct=True）或恢复继承系统代理。"""
-    for key, original in zip(("no_proxy", "NO_PROXY"), _ORIG_NO_PROXY):
-        if direct:
-            os.environ[key] = ((original or "") + "," + _TQ_HOSTS).lstrip(",")
-        elif original is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = original
-
-
-_AUTH_URL = "https://auth.shinnytech.com/auth/realms/shinnytech/protocol/openid-connect/token"
-
-
-def auth_check(user: str, password: str):
-    """带硬截止时间的账号校验。
-
-    requests 的 timeout 只管 TCP 连接/读，DNS 解析不在其内；系统 DNS 或代理
-    异常时一次请求可以无声无息挂住几分钟。这里把整段校验放进工作线程，
-    超过 45 秒直接判失败返回，绝不让登录界面无限等待。
-
-    返回 (是否通过, 是否直连, 提示信息, 是否属网络问题)。
-    网络问题做“软失败”：先放行进主界面，由后续行情连接做最终判定。
-    """
-    box: dict = {}
-
-    def work() -> None:
-        try:
-            box["value"] = _auth_attempts(user, password)
-        except BaseException as exc:  # noqa: BLE001
-            box["error"] = exc
-
-    worker = threading.Thread(target=work, daemon=True)
-    worker.start()
-    worker.join(45)
-    if worker.is_alive():
-        log("账号验证：45 秒无响应，判定为 DNS/代理异常")
-        return False, True, "账号验证 45 秒无响应：DNS 或代理异常，请关闭 VPN/代理后重试", True
-    if "error" in box:
-        return False, True, f"账号验证异常：{box['error']}", True
-    return box["value"]
-
-
-def _auth_attempts(user: str, password: str):
-    """返回 (是否成功, 是否需要直连, 错误信息, 是否网络问题)。"""
-    if requests is None:
-        return False, True, f"缺少 requests 模块：{_REQUESTS_ERROR!r}", True
-
-    data = {
-        "client_id": "shinny_tq",
-        "client_secret": "be30b9f4-6862-488a-99ad-21bde0400081",
-        "grant_type": "password",
-        "username": user,
-        "password": password,
-    }
-    last_error = None
-    # 没配置代理时直连就是唯一通路，直接按长超时等；配置了代理才需要两条路都试
-    configured = requests.utils.getproxies()
-    routes = (True, False) if configured else (True,)
-    log(f"账号验证：开始（系统代理：{configured or '无'}）")
-    for direct in routes:
-        apply_proxy_mode(direct)
-        route = "直连" if direct else "系统代理"
-        timeout = (4, 10) if len(routes) > 1 and direct else (8, 15)
-        log(f"账号验证：尝试{route}")
-        try:
-            # (连接超时, 读取超时)：连接不通就换另一条路，避免死等
-            response = requests.post(_AUTH_URL, data=data, timeout=timeout)
-        except Exception as exc:
-            last_error = exc
-            log(f"账号验证：{route}失败（{type(exc).__name__}）")
-            continue
-        if response.status_code == 200:
-            log(f"账号验证：{route}成功")
-            return True, direct, "", False
-        try:
-            detail = json.loads(response.content)
-        except Exception:
-            detail = response.text[:200]
-        return False, direct, f"用户权限认证失败（{response.status_code}）：{detail}", False
-    route_text = "直连、系统代理" if len(routes) > 1 else "直连"
-    return False, True, f"无法连接天勤认证服务器（{route_text}均失败）：{last_error}", True
-
-
 # tqsdk 的导入（numpy/pandas/scipy）很重，进程一启动就在后台预热，
-# 用户输密码的时间足够完成，点击登录时只需连接行情服务器。
+# 与界面启动并行，点击登录时通常已经就绪。
 _TQSDK = None
 _TQSDK_ERROR = None
 _TQSDK_READY = threading.Event()
-
-
-def prewarm_tqsdk() -> None:
-    global _TQSDK, _TQSDK_ERROR
-    started = time.time()
-    try:
-        # 分模块计时，卡住时能直接看出是哪个包
-        for module in ("numpy", "pandas", "scipy", "aiohttp", "requests", "tqsdk"):
-            step = time.time()
-            __import__(module)
-            log(f"已加载 {module}（{time.time() - step:.1f}s）")
-        import tqsdk  # noqa: F811  （上面已导入，这里取模块对象）
-        _TQSDK = tqsdk
-        log(f"tqsdk 运行环境已就绪，用时 {time.time() - started:.1f}s")
-        emit({"type": "env", "ready": True, "version": getattr(tqsdk, "__version__", ""),
-              "seconds": round(time.time() - started, 2)})
-    except Exception as exc:
-        _TQSDK_ERROR = exc
-        log(f"tqsdk 运行环境加载失败：{exc}\n{traceback.format_exc()}")
-        emit({"type": "env", "ready": False,
-              "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
-    finally:
-        _TQSDK_READY.set()
 
 # Windows 管道默认使用本地代码页，这里统一成 UTF-8，避免中文乱码。
 for _stream in (sys.stdout, sys.stderr):
@@ -234,16 +124,43 @@ def to_ms(value) -> int:
     return 0
 
 
+def prewarm_tqsdk() -> None:
+    global _TQSDK, _TQSDK_ERROR
+    started = time.time()
+    try:
+        # 分模块计时，卡住时能直接看出是哪个包
+        for module in ("numpy", "pandas", "scipy", "aiohttp", "tqsdk"):
+            step = time.time()
+            __import__(module)
+            log(f"已加载 {module}（{time.time() - step:.1f}s）")
+        import tqsdk  # noqa: F811  （上面已导入，这里取模块对象）
+        _TQSDK = tqsdk
+        log(f"tqsdk 运行环境已就绪，用时 {time.time() - started:.1f}s")
+        emit({"type": "env", "ready": True, "version": getattr(tqsdk, "__version__", ""),
+              "seconds": round(time.time() - started, 2)})
+    except Exception as exc:
+        _TQSDK_ERROR = exc
+        log(f"tqsdk 运行环境加载失败：{exc}\n{traceback.format_exc()}")
+        emit({"type": "env", "ready": False,
+              "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
+    finally:
+        _TQSDK_READY.set()
+
+
+# 品种 -> 交易所（天勤代码必须带交易所前缀）。表按天勤合约服务实际上市品种核对。
 _EXCHANGE_PRODUCTS = {
-    "SHFE": "rb hc cu al zn pb ni sn au ag ss sp fu bu ru wr br".split(),
-    "DCE": "a b c cs i j jm jd l m p pp v y eg eb pg lh bb fb rr lg".split(),
-    "CZCE": "MA TA SR CF CY FG RM OI ZC SM SF AP CJ UR SA PF PK RS RI WH JR LR PM PX SH PR".split(),
+    "SHFE": "rb hc cu al zn pb ni sn au ag ss sp fu bu ru wr br ao ad op".split(),
+    "DCE": "a b c cs i j jm jd l m p pp v y eg eb pg lh bb fb rr lg bz".split(),
+    "CZCE": ("MA TA SR CF CY FG RM OI ZC SM SF AP CJ UR SA PF PK RS RI WH JR LR PM PX SH PR PL"
+             .split()),
     "CFFEX": "IF IH IC IM IO HO MO T TF TS TL".split(),
     "INE": "sc lu bc nr ec".split(),
-    "GFEX": "si lc ps".split(),
+    "GFEX": "si lc ps pd pt".split(),
 }
 
-_DASH_OPTION_EXCHANGES = {"DCE", "CFFEX"}
+# 期权代码带横线的交易所：DCE.m2601-C-2500 / CFFEX.IO2601-C-3800 / GFEX.lc2401-C-100000；
+# 上期所、能源中心、郑商所不带横线：SHFE.ag2612C13500 / CZCE.SR601C5800
+_DASH_OPTION_EXCHANGES = {"DCE", "CFFEX", "GFEX"}
 
 
 def infer_symbol(instrument_id: str) -> str:
@@ -293,6 +210,38 @@ def infer_symbol(instrument_id: str) -> str:
     return text
 
 
+def quote_arrays(quote):
+    ask_prices, ask_volumes, bid_prices, bid_volumes = [], [], [], []
+    for i in range(1, 6):
+        ask_prices.append(num(getattr(quote, f"ask_price{i}", 0)))
+        ask_volumes.append(integer(getattr(quote, f"ask_volume{i}", 0)))
+        bid_prices.append(num(getattr(quote, f"bid_price{i}", 0)))
+        bid_volumes.append(integer(getattr(quote, f"bid_volume{i}", 0)))
+    return ask_prices, ask_volumes, bid_prices, bid_volumes
+
+
+def snapshot(quote) -> dict:
+    """把 quote 拍成一份纯数值快照，用于”有没有变化”的逐字段判定。"""
+    ask_prices, ask_volumes, bid_prices, bid_volumes = quote_arrays(quote)
+    return {
+        "ts": to_ms(getattr(quote, "datetime", None)),
+        "last": num(getattr(quote, "last_price", 0)),
+        "volume": integer(getattr(quote, "volume", 0)),
+        "oi": integer(getattr(quote, "open_interest", 0)),
+        "stamp": str(getattr(quote, "datetime", "") or ""),
+        "ask_prices": ask_prices,
+        "ask_volumes": ask_volumes,
+        "bid_prices": bid_prices,
+        "bid_volumes": bid_volumes,
+    }
+
+
+def snapshot_key(snap: dict):
+    return (snap["stamp"], snap["ts"], snap["last"], snap["volume"], snap["oi"],
+            tuple(snap["ask_prices"]), tuple(snap["ask_volumes"]),
+            tuple(snap["bid_prices"]), tuple(snap["bid_volumes"]))
+
+
 def side_of(last: float, ask1: float, bid1: float, prev_last: float) -> int:
     if last <= 0:
         return 0
@@ -317,45 +266,24 @@ def build_row(ts: int, last: float, bid1: float, ask1: float, total: int, open_i
     return row
 
 
-def quote_arrays(quote):
-    ask_prices, ask_volumes, bid_prices, bid_volumes = [], [], [], []
-    for i in range(1, 6):
-        ask_prices.append(num(getattr(quote, f"ask_price{i}", 0)))
-        ask_volumes.append(integer(getattr(quote, f"ask_volume{i}", 0)))
-        bid_prices.append(num(getattr(quote, f"bid_price{i}", 0)))
-        bid_volumes.append(integer(getattr(quote, f"bid_volume{i}", 0)))
-    return ask_prices, ask_volumes, bid_prices, bid_volumes
-
-
 class Bridge:
+    """行情线程持有 TqApi；主线程只读指令并转发。"""
+
     def __init__(self) -> None:
-        self.api = None
+        self.running = True
         self.user = ""
-        self.quotes: dict[str, object] = {}
-        self.active: set[str] = set()
+        self.password = ""
+        self.api = None
+        self.thread: threading.Thread | None = None
+        self.cmds: "queue.Queue[dict]" = queue.Queue()
+        # 以下仅在行情线程内读写
+        self.quotes: dict[str, list] = {}       # symbol -> [quote, 上一笔快照键]
+        self.active: set[str] = set()           # 需要持续推送行情的合约
         self.prev_total: dict[str, int] = {}
         self.prev_last: dict[str, float] = {}
-        self.running = True
-        self.net_direct = True
-        self.login_thread = None
-        self.pending_open = None
-        self.api_failed = False
-        self.pending_flush = False
-        self.deferred: list[dict] = []
+        self.ready_reported = False
 
     # ------------------------------------------------------------------ 登录
-    def close_api(self) -> None:
-        self.active.clear()
-        self.quotes.clear()
-        self.prev_total.clear()
-        self.prev_last.clear()
-        if self.api is not None:
-            try:
-                self.api.close()
-            except Exception:
-                pass
-            self.api = None
-
     def cmd_login(self, request: dict) -> None:
         user = str(request.get("user") or "")
         password = str(request.get("password") or "")
@@ -363,118 +291,164 @@ class Bridge:
         if not user or not password:
             emit({"type": "login_result", "ok": False, "message": "账号或密码为空"})
             return
-        if self.login_thread is not None and self.login_thread.is_alive():
-            log("上一次账号验证仍在进行，忽略重复登录请求")
+        if self.thread is not None and self.thread.is_alive():
+            log("行情线程已在运行，忽略重复登录请求")
             return
-
-        thread = threading.Thread(target=self._login_worker, args=(user, password), daemon=True)
-        self.login_thread = thread
-        thread.start()
-
-    def _login_worker(self, user: str, password: str) -> None:
-        """只走 OAuth2 接口验证账号，不导入 tqsdk，主循环保持可响应。"""
-        started = time.time()
-        try:
-            ok, direct, message, soft = auth_check(user, password)
-        except Exception as exc:
-            log(f"账号验证异常：{exc}\n{traceback.format_exc()}")
-            emit({"type": "login_result", "ok": False, "message": f"账号验证异常：{exc}"})
-            return
-        if not ok and not soft:
-            # 明确的账号/密码错误，直接打回
-            emit({"type": "login_result", "ok": False, "message": message})
-            return
-
         self.user = user
-        self.net_direct = direct
-        if ok:
-            log(f"账号验证通过，用时 {time.time() - started:.2f}s，正在后台加载行情环境")
-            emit({"type": "login_result", "ok": True, "account": user})
-        else:
-            log(f"账号验证未完成（{message}），先放行进入主界面，由行情连接做最终校验")
-            emit({"type": "login_result", "ok": True, "account": user, "warning": message})
+        self.password = password
+        self.running = True
+        self.thread = threading.Thread(target=self._market_loop, name="market", daemon=True)
+        self.thread.start()
 
-        if self.api is not None:
-            emit({"type": "api_ready", "account": user})
+    def _market_loop(self) -> None:
+        """与 pullstack_meter 一致：连接、轮询、断开重连都在本线程内完成。"""
+        if not _TQSDK_READY.wait(120):
+            self.report_fatal("tqsdk 运行环境加载超时")
             return
-        # 真正的 TqApi 由主循环创建：它内部持有 asyncio 事件循环，
-        # 必须在同一个线程里 wait_update，不能在这里构造。
-        self.api_failed = False
-        self.pending_open = (user, password)
-
-    def open_api(self) -> None:
-        """在主线程里创建 TqApi（登录结果已经先行返回，界面不会卡住）。"""
-        if not self.pending_open:
-            return
-        user, password = self.pending_open
-        self.pending_open = None
-        started = time.time()
         if _TQSDK is None:
-            self.api_failed = True
-            message = f"加载 tqsdk 失败：{_TQSDK_ERROR or '未知错误'}"
-            log(message)
-            emit({"type": "api_error", "message": message})
-            return
-        log(f"行情环境已就绪，用时 {time.time() - started:.1f}s，正在连接行情服务器")
-        apply_proxy_mode(self.net_direct)
-        connecting = time.time()
-        try:
-            self.api = _TQSDK.TqApi(auth=_TQSDK.TqAuth(user, password), web_gui=False)
-        except Exception as exc:
-            self.api = None
-            self.api_failed = True
-            message = str(exc).strip() or "tqsdk 连接失败"
-            log(f"行情连接失败：{message}")
-            emit({"type": "api_error", "message": message})
+            self.report_fatal(f"加载 tqsdk 失败：{_TQSDK_ERROR or '未知错误'}")
             return
 
-        log(f"行情服务器连接成功，用时 {time.time() - connecting:.2f}s")
-        emit({"type": "api_ready", "account": user})
-        self.pending_flush = True
-
-    def flush_deferred(self) -> None:
-        """行情环境就绪后，补做登录期间收到的订阅/历史数据请求。"""
-        if not self.deferred:
-            return
-        pending, self.deferred = self.deferred, []
-        for request in pending:
+        delay = 1.0
+        started = time.time()
+        while self.running:
             try:
-                self.handle(request)
-            except Exception as exc:
-                log(f"补发指令失败：{exc}")
-
-    # -------------------------------------------------------------- 合约信息
-    def ensure_quote(self, symbol: str, wait: bool = True):
-        if self.api is None:
-            return None
-        quote = self.quotes.get(symbol)
-        if quote is None:
-            try:
-                quote = self.api.get_quote(symbol)
-            except Exception as exc:
-                emit({"type": "error", "message": f"订阅合约失败 {symbol}：{exc}"})
-                return None
-            self.quotes[symbol] = quote
-            self.prev_total[symbol] = integer(getattr(quote, "volume", 0))
-            self.prev_last[symbol] = num(getattr(quote, "last_price", 0))
-
-        if wait and num(getattr(quote, "commission", 0)) <= 0:
-            deadline = time.time() + 5.0
-            while time.time() < deadline and num(getattr(quote, "commission", 0)) <= 0:
-                try:
-                    self.api.wait_update(deadline=time.time() + 0.4)
-                except Exception:
+                self._session()
+                break
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc).strip() or type(exc).__name__
+                log(f"行情连接异常：{message}")
+                if self._is_auth_error(message):
+                    self.report_fatal(f"tqsdk 账号认证失败：{message}")
+                    return
+                if not self.running:
                     break
+                self._reset_session()
+                if self.ready_reported:
+                    log(f"{delay:.0f} 秒后重连行情服务器")
+                else:
+                    # 首次连接失败：把原因先显示出来，同时继续退避重试
+                    emit({"type": "api_error", "message": message})
+                    if time.time() - started > 60.0:
+                        self.report_fatal(f"行情服务器连接失败：{message}")
+                        return
+                    log(f"{delay:.0f} 秒后重试连接")
+                time.sleep(delay)
+                delay = min(delay * 2, 30.0)
+
+        self._reset_session()
+        self.api = None
+
+    @staticmethod
+    def _is_auth_error(message: str) -> bool:
+        text = message or ""
+        return ("用户权限认证失败" in text or "快期账户" in text
+                or "grant_type" in text or "unauthorized" in text.lower())
+
+    def report_fatal(self, message: str) -> None:
+        """连接彻底失败：登录阶段回 login_result(失败)，连过线则只报 api_error。"""
+        log(message)
+        if self.ready_reported:
+            emit({"type": "api_error", "message": message})
+        else:
+            emit({"type": "login_result", "ok": False, "message": message})
+
+    def _reset_session(self) -> None:
+        self.quotes.clear()
+        self.prev_total.clear()
+        self.prev_last.clear()
+        self.api = None
+
+    def _session(self) -> None:
+        started = time.time()
+        log(f"正在连接天勤行情（账号 {self.user}）")
+        # 与参考实现一致：不传 web_gui，disable_print 抑制 tqsdk 自身打印
+        api = _TQSDK.TqApi(auth=_TQSDK.TqAuth(self.user, self.password), disable_print=True)
+        self.api = api
+        log(f"行情服务器连接成功（{time.time() - started:.1f}s）")
+
+        if not self.ready_reported:
+            self.ready_reported = True
+            emit({"type": "login_result", "ok": True, "account": self.user})
+        emit({"type": "api_ready", "account": self.user})
+
+        # 断线重连后补订阅（界面也会在 api_ready 后重新下发订阅，重复无害）
+        for symbol in sorted(self.active):
+            self._subscribe_one(api, symbol)
+
+        try:
+            while self.running:
+                # deadline 轮询：非交易时段服务器无行情帧，无 deadline 会永久阻塞
+                api.wait_update(deadline=time.time() + 0.5)
+                self._drain(api)
+                self._forward()
+        finally:
+            try:
+                api.close()
+            except Exception:  # noqa: BLE001
+                pass
+            log("天勤行情连接已关闭")
+
+    # -------------------------------------------------------------- 指令处理
+    def _drain(self, api) -> None:
+        while True:
+            try:
+                request = self.cmds.get_nowait()
+            except queue.Empty:
+                return
+            command = str(request.get("cmd") or "")
+            try:
+                if command == "subscribe":
+                    self._handle_subscribe(api, request)
+                elif command == "unsubscribe_all":
+                    self.active.clear()
+                elif command == "symbol":
+                    self._handle_symbol(api, request)
+                elif command == "ticks":
+                    self._handle_ticks(api, request)
+            except Exception as exc:  # noqa: BLE001
+                log(f"处理 {command} 指令异常：{exc}")
+                log(traceback.format_exc())
+
+    def _ensure_quote(self, api, symbol: str):
+        cell = self.quotes.get(symbol)
+        if cell is not None:
+            return cell[0]
+        try:
+            quote = api.get_quote(symbol)
+        except Exception as exc:  # noqa: BLE001
+            emit({"type": "error", "message": f"订阅合约失败 {symbol}：{exc}"})
+            return None
+        self.quotes[symbol] = [quote, None]
+        self.prev_total[symbol] = integer(getattr(quote, "volume", 0))
+        self.prev_last[symbol] = num(getattr(quote, "last_price", 0))
         return quote
 
-    def cmd_symbol(self, request: dict) -> None:
-        if self.api is None:
-            emit({"type": "error", "message": "尚未登录 tqsdk"})
-            return
+    def _subscribe_one(self, api, symbol: str) -> None:
+        quote = self._ensure_quote(api, symbol)
+        if quote is not None:
+            self.active.add(symbol)
+            self._emit_quote(symbol, quote)
+            # 记下快照键，避免主循环立刻把同一笔行情再推一遍
+            cell = self.quotes.get(symbol)
+            if cell is not None:
+                try:
+                    cell[1] = snapshot_key(snapshot(quote))
+                except Exception:  # noqa: BLE001
+                    cell[1] = None
+            log(f"已订阅 {symbol}")
+
+    def _handle_subscribe(self, api, request: dict) -> None:
+        for item in request.get("symbols") or []:
+            symbol = infer_symbol(str(item))
+            if not symbol or symbol in self.active:
+                continue
+            self._subscribe_one(api, symbol)
+
+    def _handle_symbol(self, api, request: dict) -> None:
         symbol = infer_symbol(str(request.get("symbol") or "").strip())
         if not symbol:
             return
-
         payload = {
             "type": "symbol_info",
             "symbol": symbol,
@@ -489,13 +463,13 @@ class Bridge:
             "expired": False,
         }
         try:
-            info = self.api.query_symbol_info(symbol=symbol)
+            info = api.query_symbol_info(symbol=symbol)
             row = info.iloc[0] if hasattr(info, "iloc") else info
 
             def field(key, default=None):
                 try:
                     return row[key]
-                except Exception:
+                except Exception:  # noqa: BLE001
                     return default
 
             payload["name"] = str(field("instrument_name", symbol) or symbol)
@@ -505,39 +479,24 @@ class Bridge:
             payload["price_decs"] = integer(field("price_decs", 0), 0)
             payload["volume_multiple"] = num(field("volume_multiple", 1.0), 1.0)
             payload["expired"] = bool(field("expired", False))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log(f"获取合约信息失败 {symbol}：{exc}")
 
-        quote = self.ensure_quote(symbol)
+        quote = self._ensure_quote(api, symbol)
         if quote is not None:
+            # 手续费/保证金随合约信息下发；只等很短一会儿，避免拖住后面的订阅
+            deadline = time.time() + 1.5
+            while time.time() < deadline and num(getattr(quote, "commission", 0)) <= 0:
+                try:
+                    api.wait_update(deadline=time.time() + 0.3)
+                except Exception:  # noqa: BLE001
+                    break
             payload["commission"] = num(getattr(quote, "commission", 0))
             payload["margin"] = num(getattr(quote, "margin", 0))
-
         emit(payload)
 
     # -------------------------------------------------------------- 实时行情
-    def cmd_subscribe(self, request: dict) -> None:
-        if self.api is None:
-            emit({"type": "error", "message": "尚未登录 tqsdk"})
-            return
-        symbols = request.get("symbols") or []
-        for item in symbols:
-            symbol = infer_symbol(str(item))
-            if not symbol:
-                continue
-            quote = self.ensure_quote(symbol, wait=False)
-            if quote is None:
-                continue
-            self.active.add(symbol)
-            self.prev_total[symbol] = integer(getattr(quote, "volume", 0))
-            self.prev_last[symbol] = num(getattr(quote, "last_price", 0))
-            self.emit_quote(symbol, quote)
-            log(f"已订阅 {symbol}")
-
-    def cmd_unsubscribe_all(self, _request: dict) -> None:
-        self.active.clear()
-
-    def emit_quote(self, symbol: str, quote) -> None:
+    def _emit_quote(self, symbol: str, quote) -> None:
         ask_prices, ask_volumes, bid_prices, bid_volumes = quote_arrays(quote)
         emit({
             "type": "quote",
@@ -557,49 +516,51 @@ class Bridge:
             "asks": [[ask_prices[i], ask_volumes[i]] for i in range(5)],
         })
 
-    def emit_tick(self, symbol: str, quote) -> None:
-        ts = to_ms(getattr(quote, "datetime", None))
-        if ts <= 0:
+    def _emit_tick(self, symbol: str, snap: dict) -> None:
+        ts = snap["ts"]
+        last = snap["last"]
+        if ts <= 0 or last <= 0:
             return
-        last = num(getattr(quote, "last_price", 0))
-        if last <= 0:
-            return
-        ask_prices, ask_volumes, bid_prices, bid_volumes = quote_arrays(quote)
-        total = integer(getattr(quote, "volume", 0))
+        total = snap["volume"]
         previous = self.prev_total.get(symbol)
         delta = total - previous if previous is not None and total >= previous else 0
         self.prev_total[symbol] = total
         prev_last = self.prev_last.get(symbol, 0.0)
-        side = side_of(last, ask_prices[0], bid_prices[0], prev_last)
+        side = side_of(last, snap["ask_prices"][0], snap["bid_prices"][0], prev_last)
         self.prev_last[symbol] = last
 
-        row = build_row(ts, last, bid_prices[0], ask_prices[0], total,
-                        integer(getattr(quote, "open_interest", 0)), delta, side,
-                        ask_prices, ask_volumes, bid_prices, bid_volumes)
+        row = build_row(ts, last, snap["bid_prices"][0], snap["ask_prices"][0], total,
+                        snap["oi"], delta, side,
+                        snap["ask_prices"], snap["ask_volumes"],
+                        snap["bid_prices"], snap["bid_volumes"])
         emit({"type": "tick", "symbol": symbol, "row": row})
 
-    def pump_quotes(self) -> None:
-        if self.api is None:
-            return
+    def _forward(self) -> None:
+        """当前快照与上一笔比较，有变化才推行情（五档全量参与判定）。"""
         for symbol in list(self.active):
-            quote = self.quotes.get(symbol)
-            if quote is None:
+            cell = self.quotes.get(symbol)
+            if cell is None:
                 continue
+            quote = cell[0]
             try:
-                changed = self.api.is_changing(quote)
-            except Exception:
+                snap = snapshot(quote)
+            except Exception as exc:  # noqa: BLE001
+                log(f"读取行情异常 {symbol}：{exc}")
                 continue
-            if not changed:
+            if snap["last"] <= 0:      # 行情未到（空快照）：不喂零值
                 continue
-            self.emit_quote(symbol, quote)
-            self.emit_tick(symbol, quote)
+            key = snapshot_key(snap)
+            if cell[1] == key:
+                continue
+            cell[1] = key
+            self._emit_quote(symbol, quote)
+            self._emit_tick(symbol, snap)
 
     # -------------------------------------------------------------- 历史行情
-    def cmd_ticks(self, request: dict) -> None:
-        if self.api is None:
-            emit({"type": "error", "message": "尚未登录 tqsdk"})
-            return
+    def _handle_ticks(self, api, request: dict) -> None:
         symbol = infer_symbol(str(request.get("symbol") or "").strip())
+        if not symbol:
+            return
         try:
             count = int(str(request.get("count") or "10000"))
         except ValueError:
@@ -607,29 +568,32 @@ class Bridge:
         count = max(1, min(count, 20000))
 
         try:
-            serial = self.api.get_tick_serial(symbol, data_length=count)
-        except Exception as exc:
+            serial = api.get_tick_serial(symbol, data_length=count)
+        except Exception as exc:  # noqa: BLE001
             emit({"type": "ticks", "symbol": symbol, "rows": []})
             emit({"type": "error", "message": f"获取 tick 序列失败 {symbol}：{exc}"})
             return
 
-        deadline = time.time() + 30.0
-        best = -1
-        stall = 0
-        while time.time() < deadline:
+        # 与参考实现一致：tick 序列分片下发，wait_update 逐片收；
+        # 取满 count 或连续 3 秒无新增即停，总时长不超过 60 秒
+        started = time.time()
+        last_len = None
+        stable_since = None
+        while time.time() - started < 60.0:
             length = 0 if serial is None else len(serial)
             if length >= count:
                 break
-            if length == best:
-                stall += 1
-                if stall >= 6:
-                    break
-            else:
-                best = length
-                stall = 0
+            if length > 0:
+                if length == last_len:
+                    stable_since = stable_since or time.time()
+                    if time.time() - stable_since >= 3.0:
+                        break
+                else:
+                    stable_since = None
+            last_len = length
             try:
-                self.api.wait_update(deadline=time.time() + 1.0)
-            except Exception as exc:
+                api.wait_update(deadline=time.time() + 1.0)
+            except Exception as exc:  # noqa: BLE001
                 log(f"等待历史数据失败：{exc}")
                 break
 
@@ -637,25 +601,26 @@ class Bridge:
         previous_total = None
         previous_last = 0.0
         try:
-            iterable = serial.iterrows() if serial is not None else []
-            for _, row in iterable:
-                ts = to_ms(row["datetime"])
-                last = num(row["last_price"])
-                if ts <= 0 or last <= 0:
-                    continue
-                ask_prices = [num(row[f"ask_price{i}"]) for i in range(1, 6)]
-                ask_volumes = [integer(row[f"ask_volume{i}"]) for i in range(1, 6)]
-                bid_prices = [num(row[f"bid_price{i}"]) for i in range(1, 6)]
-                bid_volumes = [integer(row[f"bid_volume{i}"]) for i in range(1, 6)]
-                total = integer(row["volume"])
-                delta = total - previous_total if previous_total is not None and total >= previous_total else 0
-                previous_total = total
-                side = side_of(last, ask_prices[0], bid_prices[0], previous_last)
-                previous_last = last
-                rows.append(build_row(ts, last, bid_prices[0], ask_prices[0], total,
-                                      integer(row["open_interest"]), delta, side,
-                                      ask_prices, ask_volumes, bid_prices, bid_volumes))
-        except Exception as exc:
+            if serial is not None:
+                for _, row in serial.iterrows():
+                    ts = to_ms(row["datetime"])
+                    last = num(row["last_price"])
+                    if ts <= 0 or last <= 0:
+                        continue
+                    ask_prices = [num(row[f"ask_price{i}"]) for i in range(1, 6)]
+                    ask_volumes = [integer(row[f"ask_volume{i}"]) for i in range(1, 6)]
+                    bid_prices = [num(row[f"bid_price{i}"]) for i in range(1, 6)]
+                    bid_volumes = [integer(row[f"bid_volume{i}"]) for i in range(1, 6)]
+                    total = integer(row["volume"])
+                    delta = (total - previous_total
+                             if previous_total is not None and total >= previous_total else 0)
+                    previous_total = total
+                    side = side_of(last, ask_prices[0], bid_prices[0], previous_last)
+                    previous_last = last
+                    rows.append(build_row(ts, last, bid_prices[0], ask_prices[0], total,
+                                          integer(row["open_interest"]), delta, side,
+                                          ask_prices, ask_volumes, bid_prices, bid_volumes))
+        except Exception as exc:  # noqa: BLE001
             log(f"解析历史 tick 失败：{exc}")
             log(traceback.format_exc())
 
@@ -665,24 +630,19 @@ class Bridge:
     # ---------------------------------------------------------------- 调度
     def handle(self, request: dict) -> None:
         command = str(request.get("cmd") or "")
-        # 行情环境还在加载时，订阅类指令先排队，就绪后自动补做
-        if command in ("symbol", "subscribe", "ticks") and self.api is None and not self.api_failed:
-            self.deferred.append(request)
-            return
         if command == "login":
             self.cmd_login(request)
-        elif command == "symbol":
-            self.cmd_symbol(request)
-        elif command == "subscribe":
-            self.cmd_subscribe(request)
-        elif command == "ticks":
-            self.cmd_ticks(request)
-        elif command == "unsubscribe_all":
-            self.cmd_unsubscribe_all(request)
+        elif command in ("symbol", "subscribe", "ticks", "unsubscribe_all"):
+            self.cmds.put(request)
         elif command == "shutdown":
             self.running = False
         else:
             emit({"type": "error", "message": f"未知指令：{command}"})
+
+    def stop(self) -> None:
+        self.running = False
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(2.0)
 
 
 def reader_loop(lines: "queue.Queue[str]") -> None:
@@ -701,7 +661,7 @@ def heartbeat_loop() -> None:
 
 def main() -> int:
     emit({"type": "ready", "source": "tqsdk"})
-    # 后台预热 tqsdk，用户输密码的时间段与它并行
+    # 后台预热 tqsdk，与界面启动、账号校验并行
     threading.Thread(target=prewarm_tqsdk, daemon=True).start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
 
@@ -709,54 +669,26 @@ def main() -> int:
     threading.Thread(target=reader_loop, args=(lines,), daemon=True).start()
 
     bridge = Bridge()
-    failures = 0
     while bridge.running:
-        while bridge.running:
-            try:
-                line = lines.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                request = json.loads(line)
-            except json.JSONDecodeError:
-                log(f"无法解析指令：{line[:200]}")
-                continue
-            if not isinstance(request, dict):
-                continue
-            try:
-                bridge.handle(request)
-            except Exception as exc:
-                log(f"处理指令异常：{exc}")
-                log(traceback.format_exc())
-                emit({"type": "error", "message": str(exc)})
-
-        if not bridge.running:
-            break
-        if bridge.pending_open and _TQSDK_READY.is_set():
-            # TqApi 必须在主线程构造，之后 wait_update 也在主线程
-            bridge.open_api()
-            continue
-        if bridge.pending_flush:
-            bridge.pending_flush = False
-            bridge.flush_deferred()
-        if bridge.api is None:
-            time.sleep(0.05)
-            continue
-
         try:
-            bridge.api.wait_update(deadline=time.time() + 0.2)
-            bridge.pump_quotes()
-            failures = 0
-        except Exception as exc:
-            failures += 1
-            log(f"wait_update 异常（{failures}）：{exc}")
-            if failures >= 5:
-                emit({"type": "bye"})
-                bridge.close_api()
-                return 0
-            time.sleep(0.5)
+            line = lines.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            log(f"无法解析指令：{line[:200]}")
+            continue
+        if not isinstance(request, dict):
+            continue
+        try:
+            bridge.handle(request)
+        except Exception as exc:  # noqa: BLE001
+            log(f"处理指令异常：{exc}")
+            log(traceback.format_exc())
+            emit({"type": "error", "message": str(exc)})
 
-    bridge.close_api()
+    bridge.stop()
     emit({"type": "bye"})
     return 0
 
