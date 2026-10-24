@@ -184,14 +184,22 @@ class Bridge:
             self.api = None
 
     def cmd_login(self, request: dict) -> None:
-        from tqsdk import TqApi, TqAuth
-
         user = str(request.get("user") or "")
         password = str(request.get("password") or "")
         if not user or not password:
             emit({"type": "login_result", "ok": False, "message": "账号或密码为空"})
             return
 
+        try:
+            from tqsdk import TqApi, TqAuth
+        except Exception as exc:
+            # 内嵌运行环境缺少依赖时必须立刻回报，否则 C++ 侧只能看到超时
+            log(traceback.format_exc())
+            emit({"type": "login_result", "ok": False,
+                  "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
+            return
+
+        log(f"Python {sys.version.split()[0]}，准备登录 tqsdk（首次连接需下载合约列表，可能需要 1 分钟）")
         self.close_api()
         log(f"正在连接 tqsdk：{user}")
         started = time.time()

@@ -15,6 +15,7 @@ public:
     bool create(HINSTANCE inst);
     HWND hwnd() const { return hwnd_; }
     void showError(const std::string& message);
+    void showProgress(const std::string& message);
     void closeSelf();
 
 private:

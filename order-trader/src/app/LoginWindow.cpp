@@ -73,6 +73,11 @@ void LoginWindow::showError(const std::string& message) {
     }
 }
 
+void LoginWindow::showProgress(const std::string& message) {
+    if (!busy_) return;
+    setStatus(utf8ToWide(message), Th::textDim);
+}
+
 void LoginWindow::setStatus(const std::wstring& text, COLORREF color) {
     status_ = text;
     statusColor_ = color;

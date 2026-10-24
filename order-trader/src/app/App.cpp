@@ -365,6 +365,11 @@ void App::handleBridge(const BridgeMessage& msg) {
         if (!text.empty()) {
             applog::write("[bridge] " + text);
             setStatus(text);
+            if (pendingLogin_) {
+                // 桥接仍有输出，说明 tqsdk 正在连接/下载数据，不计入超时
+                loginSentAt_ = nowMs();
+                if (login_) login_->showProgress(text);
+            }
         }
         return;
     }
@@ -634,8 +639,9 @@ void App::invalidateAll() {
 
 void App::update() {
     const int64_t now = nowMs();
-    if (pendingLogin_ && now - loginSentAt_ > 35000) {
-        onLoginFinished(false, "登录超时，请检查网络或 tqsdk 账户");
+    // tqsdk 首次连接需下载合约列表，最长可能接近 1 分钟；只要桥接持续有输出就不算超时
+    if (pendingLogin_ && now - loginSentAt_ > 150000) {
+        onLoginFinished(false, "登录超时：tqsdk 2 分钟无响应，请检查网络后重试（详见 logs 目录日志）");
         return;
     }
     if (session_.replayLoading && now - session_.replayLoadStart > 45000) {
