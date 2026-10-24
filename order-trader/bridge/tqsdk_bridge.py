@@ -44,6 +44,14 @@ from datetime import datetime
 
 _OUT_LOCK = threading.Lock()
 
+# requests 在进程启动阶段就导入：登录线程不能再去抢导入锁，
+# 否则行情环境的 numpy 正在导入时会把账号校验堵在 import 上。
+try:
+    import requests
+except Exception as _requests_exc:  # noqa: BLE001
+    requests = None
+    _REQUESTS_ERROR = _requests_exc
+
 # tqsdk 的 HTTP 请求会继承系统代理。直连与走代理哪种可用因机器而异，
 # 登录前各用几秒探测一次，选通的那条路走，避免在不通的路上反复等 30 秒超时。
 _TQ_HOSTS = ("api.shinnytech.com,openmd.shinnytech.com,files.shinnytech.com,"
@@ -66,11 +74,38 @@ _AUTH_URL = "https://auth.shinnytech.com/auth/realms/shinnytech/protocol/openid-
 
 
 def auth_check(user: str, password: str):
-    """只用 requests 校验账号（与 TqAuth 同一个 OAuth2 接口），不导入 tqsdk。
+    """带硬截止时间的账号校验。
 
-    返回 (是否成功, 是否需要直连, 错误信息)。
+    requests 的 timeout 只管 TCP 连接/读，DNS 解析不在其内；系统 DNS 或代理
+    异常时一次请求可以无声无息挂住几分钟。这里把整段校验放进工作线程，
+    超过 45 秒直接判失败返回，绝不让登录界面无限等待。
+
+    返回 (是否通过, 是否直连, 提示信息, 是否属网络问题)。
+    网络问题做“软失败”：先放行进主界面，由后续行情连接做最终判定。
     """
-    import requests
+    box: dict = {}
+
+    def work() -> None:
+        try:
+            box["value"] = _auth_attempts(user, password)
+        except BaseException as exc:  # noqa: BLE001
+            box["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(45)
+    if worker.is_alive():
+        log("账号验证：45 秒无响应，判定为 DNS/代理异常")
+        return False, True, "账号验证 45 秒无响应：DNS 或代理异常，请关闭 VPN/代理后重试", True
+    if "error" in box:
+        return False, True, f"账号验证异常：{box['error']}", True
+    return box["value"]
+
+
+def _auth_attempts(user: str, password: str):
+    """返回 (是否成功, 是否需要直连, 错误信息, 是否网络问题)。"""
+    if requests is None:
+        return False, True, f"缺少 requests 模块：{_REQUESTS_ERROR!r}", True
 
     data = {
         "client_id": "shinny_tq",
@@ -83,10 +118,12 @@ def auth_check(user: str, password: str):
     # 没配置代理时直连就是唯一通路，直接按长超时等；配置了代理才需要两条路都试
     configured = requests.utils.getproxies()
     routes = (True, False) if configured else (True,)
+    log(f"账号验证：开始（系统代理：{configured or '无'}）")
     for direct in routes:
         apply_proxy_mode(direct)
         route = "直连" if direct else "系统代理"
-        timeout = (6, 25) if len(routes) > 1 and direct else (20, 30)
+        timeout = (4, 10) if len(routes) > 1 and direct else (8, 15)
+        log(f"账号验证：尝试{route}")
         try:
             # (连接超时, 读取超时)：连接不通就换另一条路，避免死等
             response = requests.post(_AUTH_URL, data=data, timeout=timeout)
@@ -96,14 +133,14 @@ def auth_check(user: str, password: str):
             continue
         if response.status_code == 200:
             log(f"账号验证：{route}成功")
-            return True, direct, ""
+            return True, direct, "", False
         try:
             detail = json.loads(response.content)
         except Exception:
             detail = response.text[:200]
-        return False, direct, f"用户权限认证失败（{response.status_code}）：{detail}"
+        return False, direct, f"用户权限认证失败（{response.status_code}）：{detail}", False
     route_text = "直连、系统代理" if len(routes) > 1 else "直连"
-    return False, True, f"无法连接天勤认证服务器（{route_text}均失败）：{last_error}"
+    return False, True, f"无法连接天勤认证服务器（{route_text}均失败）：{last_error}", True
 
 
 # tqsdk 的导入（numpy/pandas/scipy）很重，进程一启动就在后台预热，
@@ -284,6 +321,7 @@ class Bridge:
     def cmd_login(self, request: dict) -> None:
         user = str(request.get("user") or "")
         password = str(request.get("password") or "")
+        log(f"收到登录请求：{user}")
         if not user or not password:
             emit({"type": "login_result", "ok": False, "message": "账号或密码为空"})
             return
@@ -299,19 +337,24 @@ class Bridge:
         """只走 OAuth2 接口验证账号，不导入 tqsdk，主循环保持可响应。"""
         started = time.time()
         try:
-            ok, direct, message = auth_check(user, password)
+            ok, direct, message, soft = auth_check(user, password)
         except Exception as exc:
             log(f"账号验证异常：{exc}\n{traceback.format_exc()}")
             emit({"type": "login_result", "ok": False, "message": f"账号验证异常：{exc}"})
             return
-        if not ok:
+        if not ok and not soft:
+            # 明确的账号/密码错误，直接打回
             emit({"type": "login_result", "ok": False, "message": message})
             return
 
         self.user = user
         self.net_direct = direct
-        log(f"账号验证通过，用时 {time.time() - started:.2f}s，正在后台加载行情环境")
-        emit({"type": "login_result", "ok": True, "account": user})
+        if ok:
+            log(f"账号验证通过，用时 {time.time() - started:.2f}s，正在后台加载行情环境")
+            emit({"type": "login_result", "ok": True, "account": user})
+        else:
+            log(f"账号验证未完成（{message}），先放行进入主界面，由行情连接做最终校验")
+            emit({"type": "login_result", "ok": True, "account": user, "warning": message})
 
         if self.api is not None:
             emit({"type": "api_ready", "account": user})

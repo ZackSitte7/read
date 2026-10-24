@@ -285,7 +285,13 @@ void App::onLoginFinished(bool ok, const std::string& message) {
     }
     main_->show();
     if (login_) login_->closeSelf();
-    setStatus("账号验证通过，正在加载行情环境...");
+    if (message.empty() || message == "ok") {
+        setStatus("账号验证通过，正在加载行情环境...");
+    } else {
+        // 账号校验因网络异常未完成：已先放行，真实结果由行情连接给出
+        applog::write("login warning: " + message);
+        setStatus(message);
+    }
 }
 
 void App::startMarketData() {
@@ -316,7 +322,9 @@ void App::handleBridge(const BridgeMessage& msg) {
                 const std::string account = data.find("account")->str();
                 if (!account.empty()) config_.user = account;
             }
-            onLoginFinished(true, "ok");
+            // warning：账号校验因网络异常没做完，先进入主界面，由行情连接做最终判定
+            if (data.find("warning")) message = data.find("warning")->str();
+            onLoginFinished(true, message);
         } else {
             onLoginFinished(false, message.empty() ? "账号或密码错误" : message);
         }
@@ -423,8 +431,8 @@ void App::handleBridge(const BridgeMessage& msg) {
         return;
     }
     if (msg.type == "heartbeat") {
-        // 桥接进程存活；登录等待期间视为活动，避免把“还在验证”误判成卡死
-        if (pendingLogin_) loginSentAt_ = nowMs();
+        // 心跳只证明桥接进程存活，不代表登录有进展；
+        // 登录阶段仍按“无日志”计时，卡住才能及时退出。
         return;
     }
     if (msg.type == "log" || msg.type == "textlog") {
@@ -716,9 +724,9 @@ void App::update() {
         }
         return;
     }
-    // 桥接每 5 秒有心跳，沉默 90 秒说明进程已卡死；另加 200 秒总上限兜底
-    if (pendingLogin_ && (now - loginSentAt_ > 90000 || now - loginStartedAt_ > 200000)) {
-        std::string detail = "登录超时：tqsdk 长时间无响应";
+    // 登录阶段：桥接 90 秒没有任何日志说明账号校验卡住；另加 100 秒总上限兜底
+    if (pendingLogin_ && (now - loginSentAt_ > 90000 || now - loginStartedAt_ > 100000)) {
+        std::string detail = "登录超时：账号校验无响应";
         if (!lastBridgeLog_.empty()) detail += "（最后阶段：" + pruneUtf8(lastBridgeLog_, 70) + "）";
         onLoginFinished(false, detail);
         return;
@@ -731,7 +739,7 @@ void App::update() {
         const int elapsed = static_cast<int>((now - session_.loginAt) / 1000);
         if (elapsed >= 2 && elapsed != envHintSec_) {
             envHintSec_ = elapsed;
-            setStatus("账号验证已通过，正在加载行情环境（已等待 " + std::to_string(elapsed) + " 秒）");
+            setStatus("正在加载行情环境（已等待 " + std::to_string(elapsed) + " 秒）");
         }
     }
     if (replay_.active()) {
