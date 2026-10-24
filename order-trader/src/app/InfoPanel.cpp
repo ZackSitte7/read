@@ -27,14 +27,6 @@ std::wstring clockText(int64_t ms) {
     return buf;
 }
 
-int textWidth(HDC dc, HFONT font, const std::wstring& text) {
-    HGDIOBJ old = SelectObject(dc, font);
-    SIZE size{};
-    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
-    SelectObject(dc, old);
-    return size.cx;
-}
-
 }  // namespace
 
 void InfoPanel::registerClass(HINSTANCE inst) {
