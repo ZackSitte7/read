@@ -22,6 +22,8 @@ struct Session {
     std::string user;
     bool loggedIn = false;
     bool bridgeReady = false;
+    bool apiReady = false;
+    bool apiFailed = false;
     RunMode mode = RunMode::Live;
     double speed = 1.0;
     int page = 0;
@@ -54,6 +56,7 @@ public:
     void pumpBridge();
     void requestLogin(const std::string& user, const std::string& password);
     void onLoginFinished(bool ok, const std::string& message);
+    void startMarketData();
 
     void setPage(int page);
     void addSymbol(const std::string& symbol, bool toCurrentPage);
@@ -131,6 +134,7 @@ private:
     std::string lastBridgeLog_;
     int64_t lastEquitySample_ = 0;
     int64_t lastReplay_ = 0;
+    int envHintSec_ = -1;
 };
 
 }  // namespace ot

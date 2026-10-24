@@ -155,6 +155,11 @@ bool App::init(HINSTANCE inst) {
     sim_.setFeeFallback(config_.defaultCommission);
     session_.speed = speedValue();
 
+    // 解压包带的“来自 Internet”标记会让系统逐个文件做信誉检查，
+    // 首次加载 Python/numpy 时可能卡几分钟，这里一次性清掉。
+    const int unblocked = clearMarkOfTheWeb(exeDir());
+    applog::write("cleared mark-of-the-web on " + std::to_string(unblocked) + " files");
+
     applog::write("Order Trader v1.0 启动");
     return true;
 }
@@ -262,6 +267,9 @@ void App::onLoginFinished(bool ok, const std::string& message) {
     }
 
     session_.loggedIn = true;
+    session_.apiReady = false;
+    session_.apiFailed = false;
+    envHintSec_ = -1;
     session_.user = pendingUser_.empty() ? config_.user : pendingUser_;
     session_.loginAt = nowMs();
     session_.status = "登录成功";
@@ -277,8 +285,11 @@ void App::onLoginFinished(bool ok, const std::string& message) {
     }
     main_->show();
     if (login_) login_->closeSelf();
+    setStatus("账号验证通过，正在加载行情环境...");
+}
 
-    // 合约元数据 + 订阅
+void App::startMarketData() {
+    // 行情环境就绪：取合约元数据并按当前模式订阅实时行情或加载回放
     const auto symbols = allSymbols();
     for (const auto& sym : symbols) requestSymbolMeta(sym);
     if (session_.mode == RunMode::Live) {
@@ -390,6 +401,30 @@ void App::handleBridge(const BridgeMessage& msg) {
             if (pendingLogin_) onLoginFinished(false, text);
             else if (login_) login_->showError(text);
         }
+        return;
+    }
+    if (msg.type == "api_ready") {
+        session_.apiReady = true;
+        session_.apiFailed = false;
+        envHintSec_ = -1;
+        applog::write("api ready");
+        setStatus("行情服务器已连接");
+        startMarketData();
+        return;
+    }
+    if (msg.type == "api_error") {
+        session_.apiReady = false;
+        session_.apiFailed = true;
+        envHintSec_ = -1;
+        const std::string text =
+            data.find("message") ? data.find("message")->str() : "行情服务器连接失败";
+        applog::write("api error: " + text);
+        setStatus("行情连接失败：" + text);
+        return;
+    }
+    if (msg.type == "heartbeat") {
+        // 桥接进程存活；登录等待期间视为活动，避免把“还在验证”误判成卡死
+        if (pendingLogin_) loginSentAt_ = nowMs();
         return;
     }
     if (msg.type == "log" || msg.type == "textlog") {
@@ -690,6 +725,14 @@ void App::update() {
     }
     if (session_.replayLoading && now - session_.replayLoadStart > 45000) {
         finalizeReplayLoad();
+    }
+    // 账号已通过、行情环境仍在加载时，每秒给出已等待时长，避免界面看起来“卡住”
+    if (session_.loggedIn && !session_.apiReady && !session_.apiFailed && session_.loginAt > 0) {
+        const int elapsed = static_cast<int>((now - session_.loginAt) / 1000);
+        if (elapsed >= 2 && elapsed != envHintSec_) {
+            envHintSec_ = elapsed;
+            setStatus("账号验证已通过，正在加载行情环境（已等待 " + std::to_string(elapsed) + " 秒）");
+        }
     }
     if (replay_.active()) {
         std::vector<Tick> ticks = replay_.pump(now);
