@@ -45,6 +45,7 @@ tick row 布局（28 项）：
 
 from __future__ import annotations
 
+import faulthandler
 import json
 import math
 import os
@@ -126,9 +127,22 @@ def to_ms(value) -> int:
 
 
 def prewarm_tqsdk() -> None:
+    """导入 tqsdk 运行环境。**必须在主线程调用**。
+
+    目标机实测：同一个 python.exe、同一个目录，`--selftest` 在主线程导入
+    numpy 只要 0.15s，而放进工作线程后 `__import__("numpy")` 会一直不返回
+    （界面等满 5 分钟超时）。原理上这是导入期间（LoadLibrary 装载 BLAS 等
+    扩展 DLL）与其它线程的冲突，因此把导入固定在主线程，和自检走同一条路径。
+    """
     global _TQSDK, _TQSDK_ERROR
     started = time.time()
     threading.Thread(target=_import_progress, args=(started,), daemon=True).start()
+    # 兜底诊断：正常导入几秒到几十秒，超过 2 分钟还没完成明显异常，此时把所有线程
+    # 的调用栈打到 stderr（与 stdout 是同一个管道），C++ 侧会以 [bridge] 前缀写进 logs。
+    try:
+        faulthandler.dump_traceback_later(120, repeat=False)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         # 分模块计时，卡住时能直接看出是哪个包；每步先报"正在加载"，卡死也停在这一行。
         # scipy 的子模块是懒加载，`import scipy` 本身几乎不耗时，真正的工作量在
@@ -152,6 +166,10 @@ def prewarm_tqsdk() -> None:
         emit({"type": "env", "ready": False,
               "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
     finally:
+        try:
+            faulthandler.cancel_dump_traceback_later()
+        except Exception:  # noqa: BLE001
+            pass
         _TQSDK_READY.set()
 
 
@@ -296,6 +314,7 @@ class Bridge:
         self.prev_total: dict[str, int] = {}
         self.prev_last: dict[str, float] = {}
         self.ready_reported = False
+        self.need_warm = False
 
     # ------------------------------------------------------------------ 登录
     def cmd_login(self, request: dict) -> None:
@@ -312,11 +331,17 @@ class Bridge:
         self.user = user
         self.password = password
         self.running = True
-        # 先让界面放行：tqsdk 首次导入（Windows 上可能被安全软件扫描很久）不应该
-        # 挡住主界面。真正的连接结果由 api_ready / api_error 给出；
+        # 先让界面放行：加载/连接的结果由 api_ready / api_error 给出；
         # 账号密码错误时 report_fatal 会再回一条 ok=false 的 login_result。
         emit({"type": "login_result", "ok": True, "account": user})
-        log("账号已受理，后台加载 tqsdk 并连接行情…")
+        if _TQSDK_READY.is_set():
+            self.start_market()
+        else:
+            # 导入放到主线程做（见 prewarm_tqsdk 的说明），由 main() 在受理后执行
+            self.need_warm = True
+            log("账号已受理，正在加载行情环境…")
+
+    def start_market(self) -> None:
         self.thread = threading.Thread(target=self._market_loop, name="market", daemon=True)
         self.thread.start()
 
@@ -773,8 +798,7 @@ def main() -> int:
         sys.stdout = _PROTOCOL_OUT
         return selftest()
     emit({"type": "ready", "source": "tqsdk"})
-    # 后台预热 tqsdk，与界面启动、账号校验并行
-    threading.Thread(target=prewarm_tqsdk, daemon=True).start()
+    # 心跳/进度线程只做计时与日志，tqsdk 的导入留在主线程（见 prewarm_tqsdk）
     threading.Thread(target=heartbeat_loop, daemon=True).start()
 
     lines: "queue.Queue[str]" = queue.Queue()
@@ -799,6 +823,12 @@ def main() -> int:
             log(f"处理指令异常：{exc}")
             log(traceback.format_exc())
             emit({"type": "error", "message": str(exc)})
+        if bridge.need_warm:
+            # 账号已受理（login_result 已发出），现在在主线程里导入运行环境；
+            # 期间读指令的线程仍在跑，只是本轮循环要等导入结束才回到 stdin。
+            bridge.need_warm = False
+            prewarm_tqsdk()
+            bridge.start_market()
 
     bridge.stop()
     emit({"type": "bye"})
