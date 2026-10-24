@@ -127,6 +127,7 @@ def to_ms(value) -> int:
 def prewarm_tqsdk() -> None:
     global _TQSDK, _TQSDK_ERROR
     started = time.time()
+    threading.Thread(target=_import_progress, args=(started,), daemon=True).start()
     try:
         # 分模块计时，卡住时能直接看出是哪个包
         for module in ("numpy", "pandas", "scipy", "aiohttp", "tqsdk"):
@@ -145,6 +146,12 @@ def prewarm_tqsdk() -> None:
               "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
     finally:
         _TQSDK_READY.set()
+
+
+def _import_progress(started: float) -> None:
+    """导入期间每 12 秒报一次进度：Windows 首次加载 numpy 可能被安全软件扫描很久。"""
+    while not _TQSDK_READY.wait(12.0):
+        log(f"正在加载 tqsdk 运行环境（已等待 {time.time() - started:.0f} 秒，首次启动较慢）")
 
 
 # 品种 -> 交易所（天勤代码必须带交易所前缀）。表按天勤合约服务实际上市品种核对。
@@ -293,17 +300,23 @@ class Bridge:
             return
         if self.thread is not None and self.thread.is_alive():
             log("行情线程已在运行，忽略重复登录请求")
+            emit({"type": "login_result", "ok": True, "account": user})
             return
         self.user = user
         self.password = password
         self.running = True
+        # 先让界面放行：tqsdk 首次导入（Windows 上可能被安全软件扫描很久）不应该
+        # 挡住主界面。真正的连接结果由 api_ready / api_error 给出；
+        # 账号密码错误时 report_fatal 会再回一条 ok=false 的 login_result。
+        emit({"type": "login_result", "ok": True, "account": user})
+        log("账号已受理，后台加载 tqsdk 并连接行情…")
         self.thread = threading.Thread(target=self._market_loop, name="market", daemon=True)
         self.thread.start()
 
     def _market_loop(self) -> None:
         """与 pullstack_meter 一致：连接、轮询、断开重连都在本线程内完成。"""
-        if not _TQSDK_READY.wait(120):
-            self.report_fatal("tqsdk 运行环境加载超时")
+        if not _TQSDK_READY.wait(600):
+            self.report_fatal("tqsdk 运行环境加载超时（10 分钟），请检查安全软件是否拦截 python.exe")
             return
         if _TQSDK is None:
             self.report_fatal(f"加载 tqsdk 失败：{_TQSDK_ERROR or '未知错误'}")
@@ -367,9 +380,7 @@ class Bridge:
         self.api = api
         log(f"行情服务器连接成功（{time.time() - started:.1f}s）")
 
-        if not self.ready_reported:
-            self.ready_reported = True
-            emit({"type": "login_result", "ok": True, "account": self.user})
+        self.ready_reported = True
         emit({"type": "api_ready", "account": self.user})
 
         # 断线重连后补订阅（界面也会在 api_ready 后重新下发订阅，重复无害）

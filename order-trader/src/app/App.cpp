@@ -731,12 +731,17 @@ void App::update() {
     if (session_.replayLoading && now - session_.replayLoadStart > 45000) {
         finalizeReplayLoad();
     }
-    // 账号已通过、行情环境仍在加载时，每秒给出已等待时长，避免界面看起来“卡住”
+    // 账号已受理、行情环境仍在加载时，每秒给出已等待时长，避免界面看起来“卡住”
     if (session_.loggedIn && !session_.apiReady && !session_.apiFailed && session_.loginAt > 0) {
         const int elapsed = static_cast<int>((now - session_.loginAt) / 1000);
         if (elapsed >= 2 && elapsed != envHintSec_) {
             envHintSec_ = elapsed;
-            setStatus("正在加载行情环境（已等待 " + std::to_string(elapsed) + " 秒）");
+            std::string text = "正在加载行情环境（已等待 " + std::to_string(elapsed) + " 秒）";
+            // Windows 首次导入 numpy 常被安全软件逐个文件扫描，可能达到一两分钟
+            if (elapsed >= 180) {
+                text += "：首次启动较慢，多为安全软件扫描 python.exe，请耐心等待";
+            }
+            setStatus(text);
         }
     }
     if (replay_.active()) {
