@@ -163,11 +163,7 @@ void LoginWindow::paint(HDC dc) {
     RECT logo{Th::S(48), Th::S(56), rc.right - Th::S(48), Th::S(104)};
     drawTextIn(dc, L"ORDER TRADER", logo, Th::accent, Th::fontTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT version{Th::S(48), Th::S(104), rc.right - Th::S(48), Th::S(128)};
-    drawTextIn(dc, L"订单流 · 虚拟盘 · v1.0", version, Th::textDim, Th::fontSmall,
-               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    drawHLine(dc, Th::S(48), rc.right - Th::S(48), Th::S(140), Th::border);
+    drawHLine(dc, Th::S(48), rc.right - Th::S(48), Th::S(126), Th::border);
 
     RECT l1{Th::S(48), Th::S(148), rc.right - Th::S(48), Th::S(170)};
     drawTextIn(dc, L"tqsdk 账号", l1, Th::textDim, Th::fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -189,10 +185,6 @@ void LoginWindow::paint(HDC dc) {
     RECT statusRect{Th::S(48), Th::S(344), rc.right - Th::S(48), Th::S(372)};
     drawTextIn(dc, status_, statusRect, statusColor_, Th::fontSmall,
                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-    RECT hint{Th::S(48), rc.bottom - Th::S(36), rc.right - Th::S(48), rc.bottom - Th::S(14)};
-    drawTextIn(dc, L"行情数据：tqsdk · tick 级 500ms 切片", hint, Th::textFaint, Th::fontSmall,
-               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // 关闭按钮
     RECT closeRect{rc.right - Th::S(40), 0, rc.right, Th::S(36)};

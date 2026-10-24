@@ -1,7 +1,9 @@
 #include "BridgeClient.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 
 #include "util/Log.h"
 #include "util/Win.h"
@@ -13,7 +15,9 @@ namespace {
 constexpr UINT kBridgeMessageId = WM_APP + 10;
 
 std::vector<wchar_t> buildEnvBlock() {
-    std::vector<wchar_t> block;
+    // Windows 要求自定义环境块必须按变量名排序，否则 CreateProcess 会返回
+    // ERROR_INVALID_PARAMETER(87)；同时必须配合 CREATE_UNICODE_ENVIRONMENT 使用。
+    std::vector<std::wstring> entries;
     LPWCH env = GetEnvironmentStringsW();
     if (env) {
         const wchar_t* skip[] = {L"PYTHONIOENCODING=", L"PYTHONUTF8=", L"PYTHONUNBUFFERED="};
@@ -26,18 +30,22 @@ std::vector<wchar_t> buildEnvBlock() {
                     break;
                 }
             }
-            if (keep) {
-                block.insert(block.end(), p, p + len);
-                block.push_back(L'\0');
-            }
+            if (keep) entries.emplace_back(p, len);
             p += len + 1;
         }
         FreeEnvironmentStringsW(env);
     }
-    const wchar_t* extra[] = {L"PYTHONIOENCODING=utf-8", L"PYTHONUTF8=1", L"PYTHONUNBUFFERED=1"};
-    for (const wchar_t* item : extra) {
-        const std::size_t len = wcslen(item);
-        block.insert(block.end(), item, item + len);
+    entries.emplace_back(L"PYTHONIOENCODING=utf-8");
+    entries.emplace_back(L"PYTHONUTF8=1");
+    entries.emplace_back(L"PYTHONUNBUFFERED=1");
+    std::sort(entries.begin(), entries.end(),
+              [](const std::wstring& a, const std::wstring& b) {
+                  return _wcsicmp(a.c_str(), b.c_str()) < 0;
+              });
+
+    std::vector<wchar_t> block;
+    for (const std::wstring& item : entries) {
+        block.insert(block.end(), item.begin(), item.end());
         block.push_back(L'\0');
     }
     block.push_back(L'\0');
@@ -74,7 +82,6 @@ bool BridgeClient::start(const std::wstring& python, const std::wstring& script,
     SetHandleInformation(stdinWrite_, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(stdoutRead_, HANDLE_FLAG_INHERIT, 0);
 
-    std::wstring cmd = L"\"" + python + L"\" -u \"" + script + L"\"";
     std::vector<wchar_t> env = buildEnvBlock();
 
     STARTUPINFOW si;
@@ -88,8 +95,19 @@ bool BridgeClient::start(const std::wstring& python, const std::wstring& script,
     PROCESS_INFORMATION pi;
     std::memset(&pi, 0, sizeof(pi));
 
-    const BOOL ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-                                   env.data(), workDir.c_str(), &si, &pi);
+    auto launch = [&](LPVOID envBlock, DWORD flags) {
+        std::wstring line = L"\"" + python + L"\" -u \"" + script + L"\"";
+        return CreateProcessW(python.c_str(), &line[0], nullptr, nullptr, TRUE, flags, envBlock,
+                              workDir.c_str(), &si, &pi);
+    };
+
+    BOOL ok = launch(env.data(), CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT);
+    if (!ok && GetLastError() == ERROR_INVALID_PARAMETER) {
+        // 个别系统对自定义环境块校验更严格，回退为继承父进程环境
+        applog::write("bridge CreateProcess 87, retry with inherited environment");
+        std::memset(&pi, 0, sizeof(pi));
+        ok = launch(nullptr, CREATE_NO_WINDOW);
+    }
     CloseHandle(stdinRead);
     CloseHandle(stdoutWrite);
 
