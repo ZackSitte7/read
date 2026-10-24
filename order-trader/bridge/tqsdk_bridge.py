@@ -199,10 +199,20 @@ class Bridge:
                   "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
             return
 
-        log(f"Python {sys.version.split()[0]}，准备登录 tqsdk（首次连接需下载合约列表，可能需要 1 分钟）")
+        log(f"Python {sys.version.split()[0]}，正在连接 tqsdk 行情服务器（需等待全市场快照）")
         self.close_api()
-        log(f"正在连接 tqsdk：{user}")
         started = time.time()
+
+        # TqApi 初始化期间主线程被阻塞，用后台心跳让界面知道仍在连接而不是卡死
+        stop = threading.Event()
+
+        def heartbeat() -> None:
+            waited = 0
+            while not stop.wait(5.0):
+                waited += 5
+                log(f"tqsdk 仍在连接，已等待 {waited} 秒")
+
+        threading.Thread(target=heartbeat, daemon=True).start()
         try:
             self.api = TqApi(auth=TqAuth(user, password), web_gui=False)
         except Exception as exc:
@@ -211,6 +221,8 @@ class Bridge:
             log(f"tqsdk 登录失败：{message}")
             emit({"type": "login_result", "ok": False, "message": message})
             return
+        finally:
+            stop.set()
 
         self.user = user
         log(f"tqsdk 登录成功，用时 {time.time() - started:.2f}s")

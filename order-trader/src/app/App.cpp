@@ -232,6 +232,7 @@ void App::requestLogin(const std::string& user, const std::string& password) {
     pendingUser_ = user;
     pendingLogin_ = true;
     loginSentAt_ = nowMs();
+    loginStartedAt_ = loginSentAt_;
     bridge_.send(cmdLogin(user, password));
     setStatus("正在验证 tqsdk 账户...");
 }
@@ -639,9 +640,9 @@ void App::invalidateAll() {
 
 void App::update() {
     const int64_t now = nowMs();
-    // tqsdk 首次连接需下载合约列表，最长可能接近 1 分钟；只要桥接持续有输出就不算超时
-    if (pendingLogin_ && now - loginSentAt_ > 150000) {
-        onLoginFinished(false, "登录超时：tqsdk 2 分钟无响应，请检查网络后重试（详见 logs 目录日志）");
+    // 连接进度日志会不断刷新 loginSentAt_；这里再加 180 秒硬上限，防止心跳把超时无限推迟
+    if (pendingLogin_ && (now - loginSentAt_ > 150000 || now - loginStartedAt_ > 180000)) {
+        onLoginFinished(false, "登录超时：tqsdk 长时间无响应，请检查网络后重试（详见 logs 目录日志）");
         return;
     }
     if (session_.replayLoading && now - session_.replayLoadStart > 45000) {

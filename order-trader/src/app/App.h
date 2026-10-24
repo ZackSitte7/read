@@ -126,6 +126,7 @@ private:
     bool pendingLogin_ = false;
     std::string pendingUser_;
     int64_t loginSentAt_ = 0;
+    int64_t loginStartedAt_ = 0;
     int64_t lastEquitySample_ = 0;
     int64_t lastReplay_ = 0;
 };
