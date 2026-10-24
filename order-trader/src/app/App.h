@@ -127,6 +127,7 @@ private:
     std::string pendingUser_;
     int64_t loginSentAt_ = 0;
     int64_t loginStartedAt_ = 0;
+    int64_t bridgeStartedAt_ = 0;
     int64_t lastEquitySample_ = 0;
     int64_t lastReplay_ = 0;
 };

@@ -190,43 +190,44 @@ class Bridge:
             emit({"type": "login_result", "ok": False, "message": "账号或密码为空"})
             return
 
-        try:
-            from tqsdk import TqApi, TqAuth
-        except Exception as exc:
-            # 内嵌运行环境缺少依赖时必须立刻回报，否则 C++ 侧只能看到超时
-            log(traceback.format_exc())
-            emit({"type": "login_result", "ok": False,
-                  "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
-            return
-
-        log(f"Python {sys.version.split()[0]}，正在连接 tqsdk 行情服务器（需等待全市场快照）")
-        self.close_api()
-        started = time.time()
-
-        # TqApi 初始化期间主线程被阻塞，用后台心跳让界面知道仍在连接而不是卡死
+        # 加载 tqsdk（numpy/pandas/scipy）本身就可能耗时十几秒，先起心跳再导入
         stop = threading.Event()
 
         def heartbeat() -> None:
             waited = 0
             while not stop.wait(5.0):
                 waited += 5
-                log(f"tqsdk 仍在连接，已等待 {waited} 秒")
+                log(f"正在登录 tqsdk，已等待 {waited} 秒")
 
         threading.Thread(target=heartbeat, daemon=True).start()
         try:
-            self.api = TqApi(auth=TqAuth(user, password), web_gui=False)
-        except Exception as exc:
-            self.api = None
-            message = str(exc).strip() or "tqsdk 登录失败"
-            log(f"tqsdk 登录失败：{message}")
-            emit({"type": "login_result", "ok": False, "message": message})
-            return
+            log("正在加载 tqsdk 运行环境（首次运行可能需要几十秒）")
+            try:
+                from tqsdk import TqApi, TqAuth
+            except Exception as exc:
+                # 内嵌运行环境缺少依赖时必须立刻回报，否则 C++ 侧只能看到超时
+                log(traceback.format_exc())
+                emit({"type": "login_result", "ok": False,
+                      "message": f"加载 tqsdk 失败：{str(exc).strip() or type(exc).__name__}"})
+                return
+
+            log(f"Python {sys.version.split()[0]}，tqsdk 运行环境就绪，正在连接行情服务器")
+            self.close_api()
+            started = time.time()
+            try:
+                self.api = TqApi(auth=TqAuth(user, password), web_gui=False)
+            except Exception as exc:
+                self.api = None
+                message = str(exc).strip() or "tqsdk 登录失败"
+                log(f"tqsdk 登录失败：{message}")
+                emit({"type": "login_result", "ok": False, "message": message})
+                return
+
+            self.user = user
+            log(f"tqsdk 登录成功，用时 {time.time() - started:.2f}s")
+            emit({"type": "login_result", "ok": True, "account": user})
         finally:
             stop.set()
-
-        self.user = user
-        log(f"tqsdk 登录成功，用时 {time.time() - started:.2f}s")
-        emit({"type": "login_result", "ok": True, "account": user})
 
     # -------------------------------------------------------------- 合约信息
     def ensure_quote(self, symbol: str, wait: bool = True):

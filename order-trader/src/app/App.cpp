@@ -219,11 +219,13 @@ void App::requestLogin(const std::string& user, const std::string& password) {
             return;
         }
         bridge_.setNotifyWindow(loginHwnd());
+        if (login_) login_->showProgress("正在启动行情桥接...");
         std::string error;
         if (!bridge_.start(python, script, exeDir(), &error)) {
             onLoginFinished(false, "启动行情桥接失败：" + error);
             return;
         }
+        bridgeStartedAt_ = nowMs();
         applog::write("bridge started: " + wideToUtf8(python));
     }
 
@@ -278,7 +280,9 @@ void App::handleBridge(const BridgeMessage& msg) {
     const Json& data = msg.data;
     if (msg.type == "ready") {
         session_.bridgeReady = true;
+        bridgeStartedAt_ = 0;
         applog::write("bridge ready");
+        if (pendingLogin_ && login_) login_->showProgress("行情桥接已就绪，正在登录 tqsdk...");
         return;
     }
     if (msg.type == "login_result") {
@@ -640,8 +644,17 @@ void App::invalidateAll() {
 
 void App::update() {
     const int64_t now = nowMs();
-    // 连接进度日志会不断刷新 loginSentAt_；这里再加 180 秒硬上限，防止心跳把超时无限推迟
-    if (pendingLogin_ && (now - loginSentAt_ > 150000 || now - loginStartedAt_ > 180000)) {
+    // 桥接进程启动后 30 秒仍未握手，说明 Python 本身没能跑起来
+    if (bridgeStartedAt_ > 0 && !session_.bridgeReady && now - bridgeStartedAt_ > 30000) {
+        bridgeStartedAt_ = 0;
+        if (pendingLogin_) {
+            onLoginFinished(false,
+                            "行情桥接启动超时：Python 未能正常运行，请查看 logs 目录日志");
+        }
+        return;
+    }
+    // 连接进度日志会不断刷新 loginSentAt_；这里再加 240 秒硬上限，防止心跳把超时无限推迟
+    if (pendingLogin_ && (now - loginSentAt_ > 150000 || now - loginStartedAt_ > 240000)) {
         onLoginFinished(false, "登录超时：tqsdk 长时间无响应，请检查网络后重试（详见 logs 目录日志）");
         return;
     }

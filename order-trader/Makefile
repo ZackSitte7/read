@@ -22,10 +22,18 @@ VERSION  := 1.0
 PKG_DIR  := $(DIST)/order-trader-v$(VERSION)
 PKG_ZIP  := $(DIST)/order-trader-v$(VERSION)-win-x64.zip
 RUNTIME  := ../runtime/python-win-x64
+# 与内置运行时同版本（3.11.x）的 Python，仅用于预编译字节码
+PY311    ?= python3.11
 
-.PHONY: all clean package runtime
+.PHONY: all clean package runtime pycache
 
 all: $(TARGET)
+
+pycache:
+	@if command -v $(PY311) >/dev/null 2>&1 && [ -d "$(RUNTIME)/Lib/site-packages" ]; then \
+		echo "预编译 Python 字节码（加速首次启动）..."; \
+		$(PY311) -m compileall -q -j 8 --invalidation-mode unchecked-hash "$(RUNTIME)/Lib/site-packages"; \
+	fi
 
 runtime:
 	bash scripts/build-runtime.sh
@@ -43,7 +51,7 @@ $(RES_OBJ): res/app.rc res/app.manifest res/app.ico
 	@mkdir -p $(BUILD)
 	$(WINDRES) -I res -i res/app.rc -o $@
 
-package: $(TARGET)
+package: $(TARGET) pycache
 	rm -rf $(PKG_DIR)
 	mkdir -p $(PKG_DIR)/bridge $(PKG_DIR)/config $(PKG_DIR)/docs
 	cp $(TARGET) $(PKG_DIR)/
