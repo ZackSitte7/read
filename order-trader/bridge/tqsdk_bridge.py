@@ -138,6 +138,9 @@ def prewarm_tqsdk() -> None:
             log(f"正在加载 {module}…")
             __import__(module)
             log(f"已加载 {module}（{time.time() - step:.1f}s）")
+        log("科学计算栈版本：" + " / ".join(
+            f"{name} {getattr(sys.modules.get(name), '__version__', '?')}"
+            for name in ("numpy", "pandas", "scipy")))
         import tqsdk  # noqa: F811  （上面已导入，这里取模块对象）
         _TQSDK = tqsdk
         log(f"tqsdk 运行环境已就绪，用时 {time.time() - started:.1f}s")
@@ -713,6 +716,9 @@ def selftest() -> int:
         print(f"{time.time() - step:6.2f}s")
     tqsdk = __import__("tqsdk")
     print(f"  tqsdk 版本 {tqsdk.__version__}  模块加载累计 {time.time() - started:.1f}s")
+    print("  科学计算栈 " + " / ".join(
+        f"{name} {getattr(sys.modules.get(name), '__version__', '?')}"
+        for name in ("numpy", "pandas", "scipy")))
 
     user, password = _selftest_account()
     if not user or not password:
