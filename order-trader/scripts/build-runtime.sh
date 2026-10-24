@@ -36,6 +36,10 @@ if [ -f "$PTH" ]; then
 fi
 
 echo "[runtime] 下载 tqsdk 及 Windows x64 轮子 ..."
+# ★ 科学计算栈必须钉版本（与 PullStackMeter 的 packaging/requirements-build.txt 一致）：
+#   numpy 2.x / pandas 3.x 在 Wine 9.0 下 import 即崩（调到 ucrtbase.dll.crealf），
+#   且体积更大、首次导入更容易被杀毒软件/OpenBLAS 初始化拖住；
+#   numpy 1.26.4 + pandas 2.2.3 + scipy 1.13.1 与 tqsdk 3.10.2 完全兼容，导入几秒即可就绪。
 python3 -m pip download \
   --dest "$WHEELS" \
   --only-binary=:all: \
@@ -43,7 +47,8 @@ python3 -m pip download \
   --python-version 3.11 \
   --implementation cp \
   --abi cp311 \
-  "tqsdk==3.10.2" "typing-extensions" "tzdata" >/dev/null
+  "tqsdk==3.10.2" "numpy==1.26.4" "pandas==2.2.3" "scipy==1.13.1" "pytz" \
+  "typing-extensions" "tzdata" >/dev/null
 
 rm -rf "$TARGET/Lib/site-packages"
 mkdir -p "$TARGET/Lib/site-packages"
@@ -75,8 +80,13 @@ for wheel in sorted(wheels.glob("*.whl")):
 print(f"[runtime] 已解包 {count} 个轮子")
 PY
 
+# 删掉各包的 tests 目录：对运行毫无用处，却要多占上千个文件（首次导入被杀毒软件
+# 逐个扫描时，文件数比体积更影响启动时间）。
+echo "[runtime] 删除测试目录 ..."
+find "$TARGET/Lib/site-packages" -type d -name tests -prune -exec rm -rf {} +
+find "$TARGET/Lib/site-packages" -type d -name __pycache__ -prune -exec rm -rf {} +
+
 echo "[runtime] 校验依赖闭包 ..."
 python3 "$ROOT/scripts/check-runtime.py" "$TARGET"
-
 du -sh "$TARGET"
 echo "[runtime] 完成：$TARGET"

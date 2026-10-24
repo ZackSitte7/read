@@ -60,6 +60,13 @@ def main() -> int:
     env = environment()
     missing: list[str] = []
 
+    # 科学计算栈必须钉死版本：numpy 2.x / pandas 3.x 会让 Windows 侧首次导入异常缓慢
+    # 甚至卡死（详见 scripts/build-runtime.sh 的说明），版本漂移一律视为构建失败。
+    for pinned in ("numpy-1.26.4", "pandas-2.2.3", "scipy-1.13.1"):
+        if not (site / f"{pinned}.dist-info").is_dir():
+            print(f"内置运行时的 {pinned} 不存在：科学计算栈版本未按约定钉住", file=sys.stderr)
+            return 1
+
     for metadata in site.glob("*.dist-info/METADATA"):
         package = metadata.parent.name.split("-")[0].lower().replace("_", "-")
         text = metadata.read_text(encoding="utf-8", errors="replace")

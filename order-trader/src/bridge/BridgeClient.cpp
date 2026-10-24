@@ -20,7 +20,10 @@ std::vector<wchar_t> buildEnvBlock() {
     std::vector<std::wstring> entries;
     LPWCH env = GetEnvironmentStringsW();
     if (env) {
-        const wchar_t* skip[] = {L"PYTHONIOENCODING=", L"PYTHONUTF8=", L"PYTHONUNBUFFERED="};
+        const wchar_t* skip[] = {L"PYTHONIOENCODING=", L"PYTHONUTF8=", L"PYTHONUNBUFFERED=",
+                                L"PYTHONDONTWRITEBYTECODE=",
+                                L"OPENBLAS_NUM_THREADS=", L"OMP_NUM_THREADS=",
+                                L"MKL_NUM_THREADS=", L"NUMEXPR_NUM_THREADS="};
         for (LPWCH p = env; *p;) {
             const std::size_t len = wcslen(p);
             bool keep = true;
@@ -38,6 +41,15 @@ std::vector<wchar_t> buildEnvBlock() {
     entries.emplace_back(L"PYTHONIOENCODING=utf-8");
     entries.emplace_back(L"PYTHONUTF8=1");
     entries.emplace_back(L"PYTHONUNBUFFERED=1");
+    // 发布包已带全套 .pyc（unchecked-hash），运行时不需要再写字节码：
+    // 少掉几千次磁盘写入，也避免目录只读或被"受控文件夹访问"拦截时出错。
+    entries.emplace_back(L"PYTHONDONTWRITEBYTECODE=1");
+    // 行情桥接只用 numpy/pandas 做数据搬运，不需要多线程 BLAS；
+    // 关掉 OpenBLAS/OMP 线程池可少读一批线程库，也避开个别机器上的初始化卡顿。
+    entries.emplace_back(L"OPENBLAS_NUM_THREADS=1");
+    entries.emplace_back(L"OMP_NUM_THREADS=1");
+    entries.emplace_back(L"MKL_NUM_THREADS=1");
+    entries.emplace_back(L"NUMEXPR_NUM_THREADS=1");
     std::sort(entries.begin(), entries.end(),
               [](const std::wstring& a, const std::wstring& b) {
                   return _wcsicmp(a.c_str(), b.c_str()) < 0;

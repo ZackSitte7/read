@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import queue
 import sys
 import threading
@@ -129,9 +130,12 @@ def prewarm_tqsdk() -> None:
     started = time.time()
     threading.Thread(target=_import_progress, args=(started,), daemon=True).start()
     try:
-        # 分模块计时，卡住时能直接看出是哪个包
-        for module in ("numpy", "pandas", "scipy", "aiohttp", "tqsdk"):
+        # 分模块计时，卡住时能直接看出是哪个包；每步先报"正在加载"，卡死也停在这一行。
+        # scipy 的子模块是懒加载，`import scipy` 本身几乎不耗时，真正的工作量在
+        # scipy.stats（tqsdk.tafunc 里 `from scipy import stats`），按子模块计时才准。
+        for module in ("numpy", "pandas", "scipy.stats", "aiohttp", "tqsdk"):
             step = time.time()
+            log(f"正在加载 {module}…")
             __import__(module)
             log(f"已加载 {module}（{time.time() - step:.1f}s）")
         import tqsdk  # noqa: F811  （上面已导入，这里取模块对象）
@@ -315,8 +319,10 @@ class Bridge:
 
     def _market_loop(self) -> None:
         """与 pullstack_meter 一致：连接、轮询、断开重连都在本线程内完成。"""
-        if not _TQSDK_READY.wait(600):
-            self.report_fatal("tqsdk 运行环境加载超时（10 分钟），请检查安全软件是否拦截 python.exe")
+        # 实测导入全套库只要几秒，冷启动叠加杀毒扫描最多一两分钟；
+        # 5 分钟还没就绪基本就是被拦截/文件缺失，继续等只会让人白等。
+        if not _TQSDK_READY.wait(300):
+            self.report_fatal("tqsdk 运行环境加载超时（5 分钟），请运行「检查环境.bat」查看卡在哪一步")
             return
         if _TQSDK is None:
             self.report_fatal(f"加载 tqsdk 失败：{_TQSDK_ERROR or '未知错误'}")
@@ -670,7 +676,96 @@ def heartbeat_loop() -> None:
         emit({"type": "heartbeat"})
 
 
+def _selftest_account() -> tuple[str, str]:
+    """自检用的账号：读发布包的 config/order-trader.json（bridge 的上级目录）。"""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "config", "order-trader.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return str(data.get("user") or ""), str(data.get("password") or "")
+    except Exception:  # noqa: BLE001
+        return "", ""
+
+
+def selftest() -> int:
+    """命令行环境自检：不经过 C++ 主程序，逐模块计时后再真实连一次行情。
+
+    用户机器上如果行情加载不出来，运行发布包里的「检查环境.bat」即可生成
+    logs/selftest.txt，直接看出卡在哪个包、卡了多久、账号能否连通。
+    """
+    print("Order Trader v1.0 行情环境自检")
+    print(f"解释器：{sys.executable}")
+    print(f"Python：{sys.version.split()[0]}  {sys.platform}  {64 if sys.maxsize > 2**32 else 32} 位")
+    started = time.time()
+    for module in ("numpy", "pandas", "scipy.stats", "aiohttp", "tqsdk"):
+        step = time.time()
+        print(f"  加载 {module:12s} … ", end="", flush=True)
+        try:
+            __import__(module)
+        except Exception as exc:  # noqa: BLE001
+            print(f"失败：{exc}")
+            print(traceback.format_exc())
+            print(f"\n自检未通过：{module} 加载失败（累计 {time.time() - started:.1f}s）")
+            print("常见原因：安全软件隔离了该目录的文件，或解压不完整。"
+                  "请把整个目录加入杀毒白名单后重新解压。")
+            return 1
+        print(f"{time.time() - step:6.2f}s")
+    tqsdk = __import__("tqsdk")
+    print(f"  tqsdk 版本 {tqsdk.__version__}  模块加载累计 {time.time() - started:.1f}s")
+
+    user, password = _selftest_account()
+    if not user or not password:
+        print("未在 config/order-trader.json 找到账号，跳过行情连接测试")
+        return 0
+
+    print(f"  连接行情服务器（账号 {user}）… ", end="", flush=True)
+    step = time.time()
+    api = None
+    try:
+        # 与桥接一致：认证与连接全交给 tqsdk，不额外拼 HTTP 校验
+        api = tqsdk.TqApi(auth=tqsdk.TqAuth(user, password), disable_print=True)
+        print(f"{time.time() - step:.1f}s 成功")
+    except Exception as exc:  # noqa: BLE001
+        print(f"失败：{exc}")
+        print(traceback.format_exc())
+        print("\n自检未通过：行情服务器连接失败（账号密码错误或网络不通）")
+        return 1
+
+    try:
+        symbol = infer_symbol("rb2701")
+        print(f"  订阅 {symbol} … ", end="", flush=True)
+        quote = api.get_quote(symbol)
+        deadline = time.time() + 20.0
+        while time.time() < deadline and not getattr(quote, "datetime", ""):
+            api.wait_update(deadline=time.time() + 1.0)
+        stamp = getattr(quote, "datetime", "")
+        if stamp:
+            print(f"{stamp}  最新价 {num(getattr(quote, 'last_price', 0)):.2f}  "
+                  f"买一 {num(getattr(quote, 'bid_price1', 0)):.2f}×{integer(getattr(quote, 'bid_volume1', 0))}  "
+                  f"卖一 {num(getattr(quote, 'ask_price1', 0)):.2f}×{integer(getattr(quote, 'ask_volume1', 0))}")
+        else:
+            print("已订阅，但 20 秒内没有行情帧（非交易时段正常）")
+    except Exception as exc:  # noqa: BLE001
+        print(f"失败：{exc}")
+        print(traceback.format_exc())
+        print("\n自检未通过：行情订阅失败")
+        return 1
+    finally:
+        try:
+            api.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    print(f"\n自检通过，总用时 {time.time() - started:.1f}s。行情环境正常。")
+    return 0
+
+
 def main() -> int:
+    if "--selftest" in sys.argv[1:]:
+        # 自检直接打印到控制台，不写协议流（stdout 在上面已被指向 stderr）
+        sys.stdout = _PROTOCOL_OUT
+        return selftest()
     emit({"type": "ready", "source": "tqsdk"})
     # 后台预热 tqsdk，与界面启动、账号校验并行
     threading.Thread(target=prewarm_tqsdk, daemon=True).start()

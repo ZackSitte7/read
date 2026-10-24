@@ -59,6 +59,7 @@ package: $(TARGET) pycache
 	cp bridge/tqsdk_bridge.py $(PKG_DIR)/bridge/
 	cp config/order-trader.json $(PKG_DIR)/config/
 	cp docs/使用说明.txt $(PKG_DIR)/docs/ 2>/dev/null || true
+	cp tools/检查环境.bat $(PKG_DIR)/
 	if [ -d "$(RUNTIME)" ]; then \
 		echo "打包内置 Python 运行时..."; \
 		cp -a "$(RUNTIME)" $(PKG_DIR)/python; \
